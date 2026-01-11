@@ -10,10 +10,11 @@ pub struct Window {
     pub focused: bool,
     pub floating: bool,
     pub urgent: bool,
+    pub workspace: usize,
 }
 
 impl Window {
-    pub fn new(id: XWindow) -> Self {
+    pub fn new(id: XWindow, workspace: usize) -> Self {
         Self {
             id,
             geometry: Rect::new(0, 0, 1, 1),
@@ -21,6 +22,7 @@ impl Window {
             focused: false,
             floating: false,
             urgent: false,
+            workspace,
         }
     }
 }

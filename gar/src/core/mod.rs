@@ -78,8 +78,8 @@ impl WindowManager {
 
         tracing::info!("Managing window {}", window);
 
-        // Track the window
-        let win = Window::new(window);
+        // Track the window with current workspace
+        let win = Window::new(window, self.focused_workspace);
         self.windows.insert(window, win);
 
         // Insert into current workspace's tree with smart splitting
