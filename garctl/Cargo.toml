@@ -1,0 +1,15 @@
+[package]
+name = "garctl"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CLI tool for controlling gar window manager"
+
+[[bin]]
+name = "garctl"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
