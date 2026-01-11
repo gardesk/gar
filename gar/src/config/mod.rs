@@ -1,4 +1,6 @@
-// Configuration module - Lua integration comes in Sprint 4
+mod lua;
+
+pub use lua::{Action, Keybind, LuaConfig, LuaState};
 
 #[derive(Debug, Clone)]
 pub struct Config {
