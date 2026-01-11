@@ -2,14 +2,41 @@ use std::process::Command;
 
 use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::xproto::{
-    ButtonPressEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt,
-    DestroyNotifyEvent, EventMask, KeyPressEvent, MapRequestEvent, ModMask, UnmapNotifyEvent,
+    ButtonPressEvent, ButtonReleaseEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt,
+    DestroyNotifyEvent, EventMask, KeyPressEvent, MapRequestEvent, ModMask, MotionNotifyEvent,
+    StackMode, UnmapNotifyEvent,
 };
 use x11rb::protocol::Event;
 
 use crate::config::Action;
-use crate::core::{Direction, Node, WindowManager};
+use crate::core::{Direction, Node, Rect, WindowManager};
 use crate::Result;
+
+/// State for mouse drag operations
+#[derive(Debug, Clone)]
+pub enum DragState {
+    Move {
+        window: u32,
+        start_x: i16,
+        start_y: i16,
+        start_geometry: Rect,
+    },
+    Resize {
+        window: u32,
+        start_x: i16,
+        start_y: i16,
+        start_geometry: Rect,
+        edge: ResizeEdge,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ResizeEdge {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
 
 impl WindowManager {
     /// Set up initial keybinds and grabs from Lua config.
@@ -39,6 +66,8 @@ impl WindowManager {
             Event::UnmapNotify(e) => self.handle_unmap_notify(e)?,
             Event::DestroyNotify(e) => self.handle_destroy_notify(e)?,
             Event::ButtonPress(e) => self.handle_button_press(e)?,
+            Event::ButtonRelease(e) => self.handle_button_release(e)?,
+            Event::MotionNotify(e) => self.handle_motion_notify(e)?,
             Event::KeyPress(e) => self.handle_key_press(e)?,
             Event::EnterNotify(e) => {
                 tracing::trace!("EnterNotify for window {}", e.event);
@@ -149,7 +178,41 @@ impl WindowManager {
 
     fn handle_button_press(&mut self, event: ButtonPressEvent) -> Result<()> {
         let window = event.event;
-        tracing::debug!("ButtonPress on window {}", window);
+        tracing::debug!("ButtonPress on window {}, button {}", window, event.detail);
+
+        // Check for mod+click on floating windows (move/resize)
+        let has_mod = event.state.contains(x11rb::protocol::xproto::KeyButMask::MOD1);
+
+        if has_mod && self.is_floating(window) {
+            let geometry = self.get_floating_geometry(window);
+
+            if event.detail == 1 {
+                // Mod+Button1 = Move
+                tracing::debug!("Starting move for floating window {}", window);
+                self.drag_state = Some(DragState::Move {
+                    window,
+                    start_x: event.root_x,
+                    start_y: event.root_y,
+                    start_geometry: geometry,
+                });
+                // Grab pointer for motion events
+                self.conn.grab_pointer(window)?;
+                return Ok(());
+            } else if event.detail == 3 {
+                // Mod+Button3 = Resize
+                let edge = determine_resize_edge(&geometry, event.root_x, event.root_y);
+                tracing::debug!("Starting resize for floating window {}, edge {:?}", window, edge);
+                self.drag_state = Some(DragState::Resize {
+                    window,
+                    start_x: event.root_x,
+                    start_y: event.root_y,
+                    start_geometry: geometry,
+                    edge,
+                });
+                self.conn.grab_pointer(window)?;
+                return Ok(());
+            }
+        }
 
         // Only handle if we manage this window
         if !self.windows.contains_key(&window) {
@@ -167,6 +230,11 @@ impl WindowManager {
             self.set_focus(window)?;
             self.conn.ungrab_button(window)?;
 
+            // Raise floating windows on focus
+            if self.is_floating(window) {
+                self.raise_window(window)?;
+            }
+
             // Replay the click so the application receives it
             self.conn.conn.allow_events(
                 x11rb::protocol::xproto::Allow::REPLAY_POINTER,
@@ -175,6 +243,61 @@ impl WindowManager {
         }
 
         self.conn.flush()?;
+        Ok(())
+    }
+
+    fn handle_button_release(&mut self, _event: ButtonReleaseEvent) -> Result<()> {
+        if self.drag_state.is_some() {
+            tracing::debug!("Ending drag operation");
+            self.drag_state = None;
+            self.conn.ungrab_pointer()?;
+            self.conn.flush()?;
+        }
+        Ok(())
+    }
+
+    fn handle_motion_notify(&mut self, event: MotionNotifyEvent) -> Result<()> {
+        let Some(ref drag) = self.drag_state else {
+            return Ok(());
+        };
+
+        match drag {
+            DragState::Move {
+                window,
+                start_x,
+                start_y,
+                start_geometry,
+            } => {
+                let dx = event.root_x - start_x;
+                let dy = event.root_y - start_y;
+                let new_x = start_geometry.x + dx;
+                let new_y = start_geometry.y + dy;
+
+                let window = *window;
+                self.set_floating_position(window, new_x, new_y)?;
+            }
+            DragState::Resize {
+                window,
+                start_x,
+                start_y,
+                start_geometry,
+                edge,
+            } => {
+                let dx = event.root_x - start_x;
+                let dy = event.root_y - start_y;
+
+                let (new_x, new_y, new_w, new_h) = calculate_resize(
+                    start_geometry,
+                    *edge,
+                    dx,
+                    dy,
+                );
+
+                let window = *window;
+                self.set_floating_geometry(window, new_x, new_y, new_w, new_h)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -252,6 +375,11 @@ impl WindowManager {
             Action::Exit => {
                 tracing::info!("Exit requested");
                 self.running = false;
+            }
+            Action::ToggleFloating => {
+                if let Some(window) = self.focused_window {
+                    self.toggle_floating(window)?;
+                }
             }
             Action::LuaCallback(index) => {
                 if let Err(e) = self.lua_config.execute_callback(index) {
@@ -471,6 +599,133 @@ impl WindowManager {
         tracing::info!("Event loop exited");
         Ok(())
     }
+
+    // Floating window helpers
+
+    fn is_floating(&self, window: u32) -> bool {
+        self.windows
+            .get(&window)
+            .map(|w| w.floating)
+            .unwrap_or(false)
+    }
+
+    fn get_floating_geometry(&self, window: u32) -> Rect {
+        self.windows
+            .get(&window)
+            .map(|w| w.geometry)
+            .unwrap_or_default()
+    }
+
+    fn set_floating_position(&mut self, window: u32, x: i16, y: i16) -> Result<()> {
+        if let Some(win) = self.windows.get_mut(&window) {
+            win.geometry.x = x;
+            win.geometry.y = y;
+            self.conn.configure_window(
+                window,
+                x,
+                y,
+                win.geometry.width,
+                win.geometry.height,
+                self.config.border_width,
+            )?;
+            self.conn.flush()?;
+        }
+        Ok(())
+    }
+
+    fn set_floating_geometry(&mut self, window: u32, x: i16, y: i16, w: u16, h: u16) -> Result<()> {
+        if let Some(win) = self.windows.get_mut(&window) {
+            win.geometry = Rect::new(x, y, w, h);
+            self.conn.configure_window(
+                window,
+                x,
+                y,
+                w,
+                h,
+                self.config.border_width,
+            )?;
+            self.conn.flush()?;
+        }
+        Ok(())
+    }
+
+    fn raise_window(&mut self, window: u32) -> Result<()> {
+        let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+        self.conn.conn.configure_window(window, &aux)?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn toggle_floating(&mut self, window: u32) -> Result<()> {
+        let Some(win) = self.windows.get_mut(&window) else {
+            return Ok(());
+        };
+
+        if win.floating {
+            // Return to tiled
+            tracing::info!("Returning window {} to tiled", window);
+            win.floating = false;
+
+            // Remove from floating list
+            self.current_workspace_mut()
+                .floating
+                .retain(|w| w.id != window);
+
+            // Insert back into BSP tree
+            let focused = self.current_workspace().focused;
+            let screen = self.screen_rect();
+            self.current_workspace_mut()
+                .tree
+                .insert_with_rect(window, focused, screen);
+
+            // Re-apply layout
+            self.apply_layout()?;
+        } else {
+            // Make floating
+            tracing::info!("Floating window {}", window);
+
+            // Get current geometry before removing from tree
+            let screen = self.screen_rect();
+            let geometries = self.current_workspace().tree.calculate_geometries(screen);
+            let geometry = geometries
+                .iter()
+                .find(|(w, _)| *w == window)
+                .map(|(_, r)| *r)
+                .unwrap_or_else(|| Rect::new(100, 100, 640, 480));
+
+            // Remove from BSP tree
+            self.current_workspace_mut().tree.remove(window);
+
+            // Mark as floating and store geometry
+            let win = self.windows.get_mut(&window).unwrap();
+            win.floating = true;
+            win.geometry = geometry;
+
+            // Add to floating list
+            let workspace_idx = self.focused_workspace;
+            self.current_workspace_mut()
+                .floating
+                .push(crate::core::Window::new(window, workspace_idx));
+
+            // Re-apply layout for tiled windows
+            self.apply_layout()?;
+
+            // Configure floating window to its geometry
+            self.conn.configure_window(
+                window,
+                geometry.x,
+                geometry.y,
+                geometry.width,
+                geometry.height,
+                self.config.border_width,
+            )?;
+
+            // Raise floating window above tiled
+            self.raise_window(window)?;
+        }
+
+        Ok(())
+    }
 }
 
 fn parse_direction(s: &str) -> Option<Direction> {
@@ -481,4 +736,52 @@ fn parse_direction(s: &str) -> Option<Direction> {
         "down" => Some(Direction::Down),
         _ => None,
     }
+}
+
+fn determine_resize_edge(geometry: &Rect, click_x: i16, click_y: i16) -> ResizeEdge {
+    let center_x = geometry.x + geometry.width as i16 / 2;
+    let center_y = geometry.y + geometry.height as i16 / 2;
+
+    match (click_x < center_x, click_y < center_y) {
+        (true, true) => ResizeEdge::TopLeft,
+        (false, true) => ResizeEdge::TopRight,
+        (true, false) => ResizeEdge::BottomLeft,
+        (false, false) => ResizeEdge::BottomRight,
+    }
+}
+
+fn calculate_resize(geometry: &Rect, edge: ResizeEdge, dx: i16, dy: i16) -> (i16, i16, u16, u16) {
+    const MIN_SIZE: u16 = 50;
+
+    let (mut x, mut y, mut w, mut h) = (
+        geometry.x,
+        geometry.y,
+        geometry.width,
+        geometry.height,
+    );
+
+    match edge {
+        ResizeEdge::TopLeft => {
+            x += dx;
+            y += dy;
+            w = (w as i16 - dx).max(MIN_SIZE as i16) as u16;
+            h = (h as i16 - dy).max(MIN_SIZE as i16) as u16;
+        }
+        ResizeEdge::TopRight => {
+            y += dy;
+            w = (w as i16 + dx).max(MIN_SIZE as i16) as u16;
+            h = (h as i16 - dy).max(MIN_SIZE as i16) as u16;
+        }
+        ResizeEdge::BottomLeft => {
+            x += dx;
+            w = (w as i16 - dx).max(MIN_SIZE as i16) as u16;
+            h = (h as i16 + dy).max(MIN_SIZE as i16) as u16;
+        }
+        ResizeEdge::BottomRight => {
+            w = (w as i16 + dx).max(MIN_SIZE as i16) as u16;
+            h = (h as i16 + dy).max(MIN_SIZE as i16) as u16;
+        }
+    }
+
+    (x, y, w, h)
 }

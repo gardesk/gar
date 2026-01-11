@@ -14,6 +14,7 @@ use x11rb::protocol::xproto::Window as XWindow;
 
 use crate::config::{Config, LuaConfig, LuaState};
 use crate::x11::Connection;
+use crate::x11::events::DragState;
 use crate::Result;
 
 pub struct WindowManager {
@@ -27,6 +28,7 @@ pub struct WindowManager {
     pub focused_workspace: usize,
     pub focused_window: Option<XWindow>,
     pub running: bool,
+    pub drag_state: Option<DragState>,
 }
 
 impl WindowManager {
@@ -58,6 +60,7 @@ impl WindowManager {
             focused_workspace: 0,
             focused_window: None,
             running: true,
+            drag_state: None,
         })
     }
 
