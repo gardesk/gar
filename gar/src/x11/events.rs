@@ -7,24 +7,139 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::protocol::Event;
 
-use crate::core::WindowManager;
+use crate::core::{Direction, Node, WindowManager};
 use crate::Result;
 
-// XK_Return keysym
+// Keysym constants
 const XK_RETURN: u32 = 0xff0d;
+const XK_Q: u32 = 0x71;
+const XK_E: u32 = 0x65;
+const XK_LEFT: u32 = 0xff51;
+const XK_UP: u32 = 0xff52;
+const XK_RIGHT: u32 = 0xff53;
+const XK_DOWN: u32 = 0xff54;
+
+/// Keybind action types
+#[derive(Debug, Clone)]
+enum Action {
+    SpawnTerminal,
+    CloseWindow,
+    Focus(Direction),
+    Swap(Direction),
+    Resize(Direction),
+    Equalize,
+}
+
+struct Keybind {
+    modifiers: ModMask,
+    keysym: u32,
+    action: Action,
+}
 
 impl WindowManager {
+    /// Get all keybinds to register.
+    fn keybinds() -> Vec<Keybind> {
+        vec![
+            // Mod+Return: spawn terminal
+            Keybind {
+                modifiers: ModMask::M4,
+                keysym: XK_RETURN,
+                action: Action::SpawnTerminal,
+            },
+            // Mod+Q: close window
+            Keybind {
+                modifiers: ModMask::M4,
+                keysym: XK_Q,
+                action: Action::CloseWindow,
+            },
+            // Mod+E: equalize splits
+            Keybind {
+                modifiers: ModMask::M4,
+                keysym: XK_E,
+                action: Action::Equalize,
+            },
+            // Mod+Arrows: focus navigation
+            Keybind {
+                modifiers: ModMask::M4,
+                keysym: XK_LEFT,
+                action: Action::Focus(Direction::Left),
+            },
+            Keybind {
+                modifiers: ModMask::M4,
+                keysym: XK_RIGHT,
+                action: Action::Focus(Direction::Right),
+            },
+            Keybind {
+                modifiers: ModMask::M4,
+                keysym: XK_UP,
+                action: Action::Focus(Direction::Up),
+            },
+            Keybind {
+                modifiers: ModMask::M4,
+                keysym: XK_DOWN,
+                action: Action::Focus(Direction::Down),
+            },
+            // Mod+Shift+Arrows: swap windows
+            Keybind {
+                modifiers: ModMask::M4 | ModMask::SHIFT,
+                keysym: XK_LEFT,
+                action: Action::Swap(Direction::Left),
+            },
+            Keybind {
+                modifiers: ModMask::M4 | ModMask::SHIFT,
+                keysym: XK_RIGHT,
+                action: Action::Swap(Direction::Right),
+            },
+            Keybind {
+                modifiers: ModMask::M4 | ModMask::SHIFT,
+                keysym: XK_UP,
+                action: Action::Swap(Direction::Up),
+            },
+            Keybind {
+                modifiers: ModMask::M4 | ModMask::SHIFT,
+                keysym: XK_DOWN,
+                action: Action::Swap(Direction::Down),
+            },
+            // Mod+Ctrl+Arrows: resize
+            Keybind {
+                modifiers: ModMask::M4 | ModMask::CONTROL,
+                keysym: XK_LEFT,
+                action: Action::Resize(Direction::Left),
+            },
+            Keybind {
+                modifiers: ModMask::M4 | ModMask::CONTROL,
+                keysym: XK_RIGHT,
+                action: Action::Resize(Direction::Right),
+            },
+            Keybind {
+                modifiers: ModMask::M4 | ModMask::CONTROL,
+                keysym: XK_UP,
+                action: Action::Resize(Direction::Up),
+            },
+            Keybind {
+                modifiers: ModMask::M4 | ModMask::CONTROL,
+                keysym: XK_DOWN,
+                action: Action::Resize(Direction::Down),
+            },
+        ]
+    }
+
     /// Set up initial keybinds and grabs.
     pub fn setup_grabs(&mut self) -> Result<()> {
-        // Grab Mod4 + Return for terminal
-        if let Some(keycode) = self.conn.keycode_from_keysym(XK_RETURN) {
-            self.conn.grab_key(ModMask::M4, keycode)?;
-            tracing::info!("Grabbed Mod4+Return (keycode {})", keycode);
-        } else {
-            tracing::warn!("Could not find keycode for Return key");
+        for keybind in Self::keybinds() {
+            if let Some(keycode) = self.conn.keycode_from_keysym(keybind.keysym) {
+                self.conn.grab_key(keybind.modifiers, keycode)?;
+                tracing::debug!(
+                    "Grabbed {:?}+keycode {} for {:?}",
+                    keybind.modifiers,
+                    keycode,
+                    keybind.action
+                );
+            }
         }
 
         self.conn.flush()?;
+        tracing::info!("Keybinds registered");
         Ok(())
     }
 
@@ -95,7 +210,6 @@ impl WindowManager {
             self.conn.flush()?;
         }
         // If we are managing it, we control its geometry via apply_layout()
-        // So we ignore the configure request (or could send a synthetic ConfigureNotify)
 
         Ok(())
     }
@@ -167,16 +281,50 @@ impl WindowManager {
 
     fn handle_key_press(&mut self, event: KeyPressEvent) -> Result<()> {
         let keycode = event.detail;
-        let modifiers = event.state;
-        tracing::debug!("KeyPress: keycode={}, modifiers={:?}", keycode, modifiers);
+        let state = event.state;
 
-        // Check for Mod4 + Return
-        let return_keycode = self.conn.keycode_from_keysym(XK_RETURN);
-        if Some(keycode) == return_keycode && modifiers.contains(ModMask::M4) {
-            tracing::info!("Spawning terminal");
-            self.spawn_terminal();
+        // Convert KeyButMask to ModMask for comparison
+        let modifiers = ModMask::from(
+            (state.bits() & (ModMask::SHIFT | ModMask::CONTROL | ModMask::M1 | ModMask::M4).bits())
+                as u16,
+        );
+
+        // Find matching keybind
+        for keybind in Self::keybinds() {
+            let bind_keycode = self.conn.keycode_from_keysym(keybind.keysym);
+            if bind_keycode == Some(keycode) && keybind.modifiers == modifiers {
+                tracing::debug!("Executing action: {:?}", keybind.action);
+                self.execute_action(keybind.action)?;
+                return Ok(());
+            }
         }
 
+        Ok(())
+    }
+
+    fn execute_action(&mut self, action: Action) -> Result<()> {
+        match action {
+            Action::SpawnTerminal => {
+                self.spawn_terminal();
+            }
+            Action::CloseWindow => {
+                if let Some(window) = self.focused_window {
+                    self.close_window(window)?;
+                }
+            }
+            Action::Focus(direction) => {
+                self.focus_direction(direction)?;
+            }
+            Action::Swap(direction) => {
+                self.swap_direction(direction)?;
+            }
+            Action::Resize(direction) => {
+                self.resize_direction(direction)?;
+            }
+            Action::Equalize => {
+                self.equalize()?;
+            }
+        }
         Ok(())
     }
 
@@ -195,6 +343,88 @@ impl WindowManager {
         }
 
         tracing::warn!("No terminal emulator found");
+    }
+
+    fn close_window(&mut self, window: u32) -> Result<()> {
+        tracing::info!("Closing window {}", window);
+
+        // TODO: Send WM_DELETE_WINDOW if supported (ICCCM)
+        // For now, just kill the client
+        self.conn.conn.kill_client(window)?;
+        self.conn.flush()?;
+
+        Ok(())
+    }
+
+    fn focus_direction(&mut self, direction: Direction) -> Result<()> {
+        let Some(focused) = self.focused_window else {
+            return Ok(());
+        };
+
+        let screen = self.screen_rect();
+        let geometries = self.current_workspace().tree.calculate_geometries(screen);
+
+        if let Some(target) = Node::find_adjacent(&geometries, focused, direction) {
+            // Regrab button on old window
+            self.conn.grab_button(focused)?;
+
+            // Focus new window
+            self.set_focus(target)?;
+            self.conn.ungrab_button(target)?;
+
+            tracing::debug!("Focused {:?} to window {}", direction, target);
+        }
+
+        Ok(())
+    }
+
+    fn swap_direction(&mut self, direction: Direction) -> Result<()> {
+        let Some(focused) = self.focused_window else {
+            return Ok(());
+        };
+
+        let screen = self.screen_rect();
+        let geometries = self.current_workspace().tree.calculate_geometries(screen);
+
+        if let Some(target) = Node::find_adjacent(&geometries, focused, direction) {
+            // Swap the windows in the tree
+            self.current_workspace_mut().tree.swap(focused, target);
+
+            // Re-apply layout
+            self.apply_layout()?;
+
+            tracing::debug!("Swapped with window {} in direction {:?}", target, direction);
+        }
+
+        Ok(())
+    }
+
+    fn resize_direction(&mut self, direction: Direction) -> Result<()> {
+        let Some(focused) = self.focused_window else {
+            return Ok(());
+        };
+
+        const RESIZE_DELTA: f32 = 0.05;
+
+        // Resize the split
+        if self
+            .current_workspace_mut()
+            .tree
+            .resize(focused, direction, RESIZE_DELTA)
+        {
+            // Re-apply layout
+            self.apply_layout()?;
+            tracing::debug!("Resized {:?}", direction);
+        }
+
+        Ok(())
+    }
+
+    fn equalize(&mut self) -> Result<()> {
+        self.current_workspace_mut().tree.equalize();
+        self.apply_layout()?;
+        tracing::debug!("Equalized splits");
+        Ok(())
     }
 
     pub fn run(&mut self) -> Result<()> {
