@@ -156,6 +156,12 @@ impl Connection {
         Ok(())
     }
 
+    /// Unmap (hide) a window.
+    pub fn unmap_window(&self, window: Window) -> Result<(), Error> {
+        self.conn.unmap_window(window)?;
+        Ok(())
+    }
+
     /// Subscribe to events on a window.
     pub fn select_input(&self, window: Window, mask: EventMask) -> Result<(), Error> {
         let aux = ChangeWindowAttributesAux::new().event_mask(mask);
