@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=gar
+Comment=Tiling window manager with smart splits
+Exec=gar
+Type=XSession
+DesktopNames=gar
