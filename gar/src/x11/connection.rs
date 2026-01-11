@@ -162,6 +162,27 @@ impl Connection {
         Ok(())
     }
 
+    /// Grab the pointer for drag operations.
+    pub fn grab_pointer(&self, _window: Window) -> Result<(), Error> {
+        self.conn.grab_pointer(
+            false,
+            self.root,
+            EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+            x11rb::NONE,
+            x11rb::NONE,
+            CURRENT_TIME,
+        )?;
+        Ok(())
+    }
+
+    /// Release pointer grab.
+    pub fn ungrab_pointer(&self) -> Result<(), Error> {
+        self.conn.ungrab_pointer(CURRENT_TIME)?;
+        Ok(())
+    }
+
     /// Subscribe to events on a window.
     pub fn select_input(&self, window: Window, mask: EventMask) -> Result<(), Error> {
         let aux = ChangeWindowAttributesAux::new().event_mask(mask);
