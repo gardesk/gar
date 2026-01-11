@@ -18,6 +18,16 @@ const XK_LEFT: u32 = 0xff51;
 const XK_UP: u32 = 0xff52;
 const XK_RIGHT: u32 = 0xff53;
 const XK_DOWN: u32 = 0xff54;
+const XK_1: u32 = 0x31;
+const XK_2: u32 = 0x32;
+const XK_3: u32 = 0x33;
+const XK_4: u32 = 0x34;
+const XK_5: u32 = 0x35;
+const XK_6: u32 = 0x36;
+const XK_7: u32 = 0x37;
+const XK_8: u32 = 0x38;
+const XK_9: u32 = 0x39;
+const XK_0: u32 = 0x30;
 
 /// Keybind action types
 #[derive(Debug, Clone)]
@@ -28,6 +38,8 @@ enum Action {
     Swap(Direction),
     Resize(Direction),
     Equalize,
+    SwitchWorkspace(usize),
+    MoveToWorkspace(usize),
 }
 
 struct Keybind {
@@ -122,6 +134,28 @@ impl WindowManager {
                 keysym: XK_DOWN,
                 action: Action::Resize(Direction::Down),
             },
+            // Alt+1-9,0: switch workspace
+            Keybind { modifiers: ModMask::M1, keysym: XK_1, action: Action::SwitchWorkspace(0) },
+            Keybind { modifiers: ModMask::M1, keysym: XK_2, action: Action::SwitchWorkspace(1) },
+            Keybind { modifiers: ModMask::M1, keysym: XK_3, action: Action::SwitchWorkspace(2) },
+            Keybind { modifiers: ModMask::M1, keysym: XK_4, action: Action::SwitchWorkspace(3) },
+            Keybind { modifiers: ModMask::M1, keysym: XK_5, action: Action::SwitchWorkspace(4) },
+            Keybind { modifiers: ModMask::M1, keysym: XK_6, action: Action::SwitchWorkspace(5) },
+            Keybind { modifiers: ModMask::M1, keysym: XK_7, action: Action::SwitchWorkspace(6) },
+            Keybind { modifiers: ModMask::M1, keysym: XK_8, action: Action::SwitchWorkspace(7) },
+            Keybind { modifiers: ModMask::M1, keysym: XK_9, action: Action::SwitchWorkspace(8) },
+            Keybind { modifiers: ModMask::M1, keysym: XK_0, action: Action::SwitchWorkspace(9) },
+            // Alt+Shift+1-9,0: move window to workspace
+            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_1, action: Action::MoveToWorkspace(0) },
+            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_2, action: Action::MoveToWorkspace(1) },
+            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_3, action: Action::MoveToWorkspace(2) },
+            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_4, action: Action::MoveToWorkspace(3) },
+            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_5, action: Action::MoveToWorkspace(4) },
+            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_6, action: Action::MoveToWorkspace(5) },
+            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_7, action: Action::MoveToWorkspace(6) },
+            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_8, action: Action::MoveToWorkspace(7) },
+            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_9, action: Action::MoveToWorkspace(8) },
+            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_0, action: Action::MoveToWorkspace(9) },
         ]
     }
 
@@ -218,15 +252,25 @@ impl WindowManager {
     fn handle_unmap_notify(&mut self, event: UnmapNotifyEvent) -> Result<()> {
         tracing::debug!("UnmapNotify for window {}", event.window);
 
-        // Remove from management
-        self.unmanage_window(event.window);
+        // Only unmanage if window is on current workspace
+        // (windows on other workspaces are unmapped due to workspace switching)
+        let on_current = self
+            .windows
+            .get(&event.window)
+            .map(|w| w.workspace == self.focused_workspace)
+            .unwrap_or(false);
 
-        // Re-apply layout
-        self.apply_layout()?;
+        if on_current {
+            // Remove from management
+            self.unmanage_window(event.window);
 
-        // Update focus
-        if let Some(window) = self.focused_window {
-            self.set_focus(window)?;
+            // Re-apply layout
+            self.apply_layout()?;
+
+            // Update focus
+            if let Some(window) = self.focused_window {
+                self.set_focus(window)?;
+            }
         }
 
         Ok(())
@@ -324,6 +368,12 @@ impl WindowManager {
             }
             Action::Equalize => {
                 self.equalize()?;
+            }
+            Action::SwitchWorkspace(idx) => {
+                self.switch_workspace(idx)?;
+            }
+            Action::MoveToWorkspace(idx) => {
+                self.move_to_workspace(idx)?;
             }
         }
         Ok(())
@@ -426,6 +476,85 @@ impl WindowManager {
         self.current_workspace_mut().tree.equalize();
         self.apply_layout()?;
         tracing::debug!("Equalized splits");
+        Ok(())
+    }
+
+    fn switch_workspace(&mut self, idx: usize) -> Result<()> {
+        if idx >= self.workspaces.len() || idx == self.focused_workspace {
+            return Ok(());
+        }
+
+        tracing::info!("Switching to workspace {}", idx + 1);
+
+        // Hide windows on current workspace
+        for window in self.current_workspace().tree.windows() {
+            self.conn.unmap_window(window)?;
+        }
+
+        // Switch workspace
+        self.focused_workspace = idx;
+
+        // Show windows on new workspace
+        for window in self.current_workspace().tree.windows() {
+            self.conn.map_window(window)?;
+        }
+
+        // Apply layout and update focus
+        self.apply_layout()?;
+
+        // Focus the workspace's focused window or first window
+        if let Some(window) = self.current_workspace().focused.or_else(|| self.current_workspace().tree.first_window()) {
+            self.set_focus(window)?;
+            self.conn.ungrab_button(window)?;
+        } else {
+            self.focused_window = None;
+        }
+
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn move_to_workspace(&mut self, idx: usize) -> Result<()> {
+        if idx >= self.workspaces.len() || idx == self.focused_workspace {
+            return Ok(());
+        }
+
+        let Some(window) = self.focused_window else {
+            return Ok(());
+        };
+
+        tracing::info!("Moving window {} to workspace {}", window, idx + 1);
+
+        // Remove from current workspace tree
+        self.current_workspace_mut().tree.remove(window);
+
+        // Update focus on current workspace
+        self.focused_window = self.current_workspace().tree.first_window();
+        self.current_workspace_mut().focused = self.focused_window;
+
+        // Update window's workspace tracking
+        if let Some(win) = self.windows.get_mut(&window) {
+            win.workspace = idx;
+        }
+
+        // Hide the window (it's moving to another workspace)
+        self.conn.unmap_window(window)?;
+
+        // Insert into target workspace
+        let target_focused = self.workspaces[idx].focused;
+        let screen = self.screen_rect();
+        self.workspaces[idx].tree.insert_with_rect(window, target_focused, screen);
+
+        // Re-apply layout on current workspace
+        self.apply_layout()?;
+
+        // Update focus
+        if let Some(new_focus) = self.focused_window {
+            self.set_focus(new_focus)?;
+            self.conn.ungrab_button(new_focus)?;
+        }
+
+        self.conn.flush()?;
         Ok(())
     }
 
