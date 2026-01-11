@@ -1,6 +1,7 @@
 [workspace]
 members = ["gar", "garctl"]
 resolver = "2"
+default-members = ["gar"]
 
 [workspace.package]
 version = "0.1.0"
