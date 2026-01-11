@@ -1,0 +1,19 @@
+[workspace]
+members = ["gar", "garctl"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["mfwolffe"]
+license = "MIT"
+repository = "https://github.com/mfwolffe/gar"
+description = "Tiling window manager with smart splits"
+
+[workspace.dependencies]
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
