@@ -78,15 +78,30 @@ impl Connection {
     }
 
     /// Grab a key combination on the root window.
+    /// Grabs with multiple modifier combinations to handle NumLock/CapsLock.
     pub fn grab_key(&self, modifiers: ModMask, keycode: u8) -> Result<(), Error> {
-        self.conn.grab_key(
-            false,
-            self.root,
+        // NumLock is typically Mod2, CapsLock is Lock
+        let numlock = ModMask::M2;
+        let capslock = ModMask::LOCK;
+
+        // Grab with all combinations of NumLock/CapsLock
+        let variants = [
             modifiers,
-            keycode,
-            GrabMode::ASYNC,
-            GrabMode::ASYNC,
-        )?;
+            modifiers | numlock,
+            modifiers | capslock,
+            modifiers | numlock | capslock,
+        ];
+
+        for mods in variants {
+            self.conn.grab_key(
+                false,
+                self.root,
+                mods,
+                keycode,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )?;
+        }
         Ok(())
     }
 

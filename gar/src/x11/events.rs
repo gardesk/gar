@@ -306,10 +306,14 @@ impl WindowManager {
         let state = event.state;
 
         // Convert KeyButMask to ModMask for comparison
+        // Filter out NumLock (M2), CapsLock (Lock), and ScrollLock (M5)
         let modifiers = ModMask::from(
             (state.bits() & (ModMask::SHIFT | ModMask::CONTROL | ModMask::M1 | ModMask::M4).bits())
                 as u16,
         );
+
+        tracing::trace!("KeyPress: keycode={}, raw_state={:?}, filtered_mods={:?}",
+            keycode, state, modifiers);
 
         // Find matching keybind from Lua config
         let action = {
@@ -396,7 +400,7 @@ impl WindowManager {
         // TODO: Send WM_DELETE_WINDOW if supported (ICCCM)
         // For now, just kill the client
         self.conn.conn.kill_client(window)?;
-        self.conn.flush()?;
+        self.conn.sync()?;
 
         Ok(())
     }
