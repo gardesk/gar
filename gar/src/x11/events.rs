@@ -372,6 +372,7 @@ impl WindowManager {
             // Focus new window
             self.set_focus(target)?;
             self.conn.ungrab_button(target)?;
+            self.conn.flush()?;
 
             tracing::debug!("Focused {:?} to window {}", direction, target);
         }
