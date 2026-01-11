@@ -60,6 +60,9 @@ gar.bind(mod .. "+ctrl+j", gar.resize("down", 0.05))
 -- Equalize splits
 gar.bind(mod .. "+e", gar.equalize)
 
+-- Toggle floating
+gar.bind(mod .. "+shift+space", gar.toggle_floating)
+
 -- Workspaces
 for i = 1, 9 do
     gar.bind(mod .. "+" .. i, gar.workspace(i))

@@ -19,6 +19,7 @@ pub enum Action {
     Equalize,
     Reload,
     Exit,
+    ToggleFloating,
     LuaCallback(usize), // Index into callback registry
 }
 
@@ -219,6 +220,7 @@ impl LuaConfig {
                             "reload" => Action::Reload,
                             "exit" => Action::Exit,
                             "equalize" => Action::Equalize,
+                            "toggle_floating" => Action::ToggleFloating,
                             "focus" => {
                                 let dir: String = t.get("direction").unwrap_or_default();
                                 Action::Focus(dir)
@@ -298,6 +300,11 @@ impl LuaConfig {
         let equalize = self.lua.create_table()?;
         equalize.set("action", "equalize")?;
         gar.set("equalize", equalize)?;
+
+        // gar.toggle_floating
+        let toggle_floating = self.lua.create_table()?;
+        toggle_floating.set("action", "toggle_floating")?;
+        gar.set("toggle_floating", toggle_floating)?;
 
         // gar.focus(direction) - creates action
         let focus_fn = self.lua.create_function(|lua, direction: String| {
