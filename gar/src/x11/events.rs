@@ -38,86 +38,87 @@ struct Keybind {
 
 impl WindowManager {
     /// Get all keybinds to register.
+    /// NOTE: Using Alt (M1) instead of Super (M4) for testing in nested X
     fn keybinds() -> Vec<Keybind> {
         vec![
-            // Mod+Return: spawn terminal
+            // Alt+Return: spawn terminal
             Keybind {
-                modifiers: ModMask::M4,
+                modifiers: ModMask::M1,
                 keysym: XK_RETURN,
                 action: Action::SpawnTerminal,
             },
-            // Mod+Q: close window
+            // Alt+Q: close window
             Keybind {
-                modifiers: ModMask::M4,
+                modifiers: ModMask::M1,
                 keysym: XK_Q,
                 action: Action::CloseWindow,
             },
-            // Mod+E: equalize splits
+            // Alt+E: equalize splits
             Keybind {
-                modifiers: ModMask::M4,
+                modifiers: ModMask::M1,
                 keysym: XK_E,
                 action: Action::Equalize,
             },
-            // Mod+Arrows: focus navigation
+            // Alt+Arrows: focus navigation
             Keybind {
-                modifiers: ModMask::M4,
+                modifiers: ModMask::M1,
                 keysym: XK_LEFT,
                 action: Action::Focus(Direction::Left),
             },
             Keybind {
-                modifiers: ModMask::M4,
+                modifiers: ModMask::M1,
                 keysym: XK_RIGHT,
                 action: Action::Focus(Direction::Right),
             },
             Keybind {
-                modifiers: ModMask::M4,
+                modifiers: ModMask::M1,
                 keysym: XK_UP,
                 action: Action::Focus(Direction::Up),
             },
             Keybind {
-                modifiers: ModMask::M4,
+                modifiers: ModMask::M1,
                 keysym: XK_DOWN,
                 action: Action::Focus(Direction::Down),
             },
-            // Mod+Shift+Arrows: swap windows
+            // Alt+Shift+Arrows: swap windows
             Keybind {
-                modifiers: ModMask::M4 | ModMask::SHIFT,
+                modifiers: ModMask::M1 | ModMask::SHIFT,
                 keysym: XK_LEFT,
                 action: Action::Swap(Direction::Left),
             },
             Keybind {
-                modifiers: ModMask::M4 | ModMask::SHIFT,
+                modifiers: ModMask::M1 | ModMask::SHIFT,
                 keysym: XK_RIGHT,
                 action: Action::Swap(Direction::Right),
             },
             Keybind {
-                modifiers: ModMask::M4 | ModMask::SHIFT,
+                modifiers: ModMask::M1 | ModMask::SHIFT,
                 keysym: XK_UP,
                 action: Action::Swap(Direction::Up),
             },
             Keybind {
-                modifiers: ModMask::M4 | ModMask::SHIFT,
+                modifiers: ModMask::M1 | ModMask::SHIFT,
                 keysym: XK_DOWN,
                 action: Action::Swap(Direction::Down),
             },
-            // Mod+Ctrl+Arrows: resize
+            // Alt+Ctrl+Arrows: resize
             Keybind {
-                modifiers: ModMask::M4 | ModMask::CONTROL,
+                modifiers: ModMask::M1 | ModMask::CONTROL,
                 keysym: XK_LEFT,
                 action: Action::Resize(Direction::Left),
             },
             Keybind {
-                modifiers: ModMask::M4 | ModMask::CONTROL,
+                modifiers: ModMask::M1 | ModMask::CONTROL,
                 keysym: XK_RIGHT,
                 action: Action::Resize(Direction::Right),
             },
             Keybind {
-                modifiers: ModMask::M4 | ModMask::CONTROL,
+                modifiers: ModMask::M1 | ModMask::CONTROL,
                 keysym: XK_UP,
                 action: Action::Resize(Direction::Up),
             },
             Keybind {
-                modifiers: ModMask::M4 | ModMask::CONTROL,
+                modifiers: ModMask::M1 | ModMask::CONTROL,
                 keysym: XK_DOWN,
                 action: Action::Resize(Direction::Down),
             },

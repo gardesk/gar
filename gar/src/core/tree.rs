@@ -317,23 +317,20 @@ impl Node {
             .collect();
 
         // Find the closest window in the direction
+        // Prioritize alignment perpendicular to movement, then distance in movement direction
         candidates
             .into_iter()
             .min_by_key(|(_, rect)| {
                 let cx = rect.x as i32 + rect.width as i32 / 2;
                 let cy = rect.y as i32 + rect.height as i32 / 2;
+                let dx = (cx - from_cx).abs();
+                let dy = (cy - from_cy).abs();
 
                 match direction {
-                    Direction::Left | Direction::Right => {
-                        let dx = (cx - from_cx).abs();
-                        let dy = (cy - from_cy).abs();
-                        dx * 10 + dy // Prioritize horizontal alignment
-                    }
-                    Direction::Up | Direction::Down => {
-                        let dx = (cx - from_cx).abs();
-                        let dy = (cy - from_cy).abs();
-                        dy * 10 + dx // Prioritize vertical alignment
-                    }
+                    // For left/right: prioritize same row (small dy), then closest x
+                    Direction::Left | Direction::Right => dy * 100 + dx,
+                    // For up/down: prioritize same column (small dx), then closest y
+                    Direction::Up | Direction::Down => dx * 100 + dy,
                 }
             })
             .map(|(w, _)| *w)
