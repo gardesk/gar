@@ -9,15 +9,18 @@ pub use window::Window;
 pub use workspace::Workspace;
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use x11rb::protocol::xproto::Window as XWindow;
 
-use crate::config::Config;
+use crate::config::{Config, LuaConfig, LuaState};
 use crate::x11::Connection;
 use crate::Result;
 
 pub struct WindowManager {
     pub conn: Connection,
     pub config: Config,
+    pub lua_config: LuaConfig,
+    pub lua_state: Arc<Mutex<LuaState>>,
     pub workspaces: Vec<Workspace>,
     pub monitors: Vec<Monitor>,
     pub windows: HashMap<XWindow, Window>,
@@ -32,9 +35,23 @@ impl WindowManager {
             .map(|i| Workspace::new(i, i.to_string()))
             .collect();
 
+        // Initialize Lua config
+        let lua_config = LuaConfig::new().map_err(|e| crate::Error::Config(e.to_string()))?;
+        let lua_state = lua_config.state();
+
+        // Load configuration
+        lua_config
+            .load()
+            .map_err(|e| crate::Error::Config(e.to_string()))?;
+
+        // Get config values from Lua state
+        let config = lua_state.lock().unwrap().config.clone();
+
         Ok(Self {
             conn,
-            config: Config::default(),
+            config,
+            lua_config,
+            lua_state,
             workspaces,
             monitors: Vec::new(),
             windows: HashMap::new(),

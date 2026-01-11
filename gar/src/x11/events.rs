@@ -7,161 +7,15 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::protocol::Event;
 
+use crate::config::Action;
 use crate::core::{Direction, Node, WindowManager};
 use crate::Result;
 
-// Keysym constants
-const XK_RETURN: u32 = 0xff0d;
-const XK_Q: u32 = 0x71;
-const XK_E: u32 = 0x65;
-const XK_LEFT: u32 = 0xff51;
-const XK_UP: u32 = 0xff52;
-const XK_RIGHT: u32 = 0xff53;
-const XK_DOWN: u32 = 0xff54;
-const XK_1: u32 = 0x31;
-const XK_2: u32 = 0x32;
-const XK_3: u32 = 0x33;
-const XK_4: u32 = 0x34;
-const XK_5: u32 = 0x35;
-const XK_6: u32 = 0x36;
-const XK_7: u32 = 0x37;
-const XK_8: u32 = 0x38;
-const XK_9: u32 = 0x39;
-const XK_0: u32 = 0x30;
-
-/// Keybind action types
-#[derive(Debug, Clone)]
-enum Action {
-    SpawnTerminal,
-    CloseWindow,
-    Focus(Direction),
-    Swap(Direction),
-    Resize(Direction),
-    Equalize,
-    SwitchWorkspace(usize),
-    MoveToWorkspace(usize),
-}
-
-struct Keybind {
-    modifiers: ModMask,
-    keysym: u32,
-    action: Action,
-}
-
 impl WindowManager {
-    /// Get all keybinds to register.
-    /// NOTE: Using Alt (M1) instead of Super (M4) for testing in nested X
-    fn keybinds() -> Vec<Keybind> {
-        vec![
-            // Alt+Return: spawn terminal
-            Keybind {
-                modifiers: ModMask::M1,
-                keysym: XK_RETURN,
-                action: Action::SpawnTerminal,
-            },
-            // Alt+Q: close window
-            Keybind {
-                modifiers: ModMask::M1,
-                keysym: XK_Q,
-                action: Action::CloseWindow,
-            },
-            // Alt+E: equalize splits
-            Keybind {
-                modifiers: ModMask::M1,
-                keysym: XK_E,
-                action: Action::Equalize,
-            },
-            // Alt+Arrows: focus navigation
-            Keybind {
-                modifiers: ModMask::M1,
-                keysym: XK_LEFT,
-                action: Action::Focus(Direction::Left),
-            },
-            Keybind {
-                modifiers: ModMask::M1,
-                keysym: XK_RIGHT,
-                action: Action::Focus(Direction::Right),
-            },
-            Keybind {
-                modifiers: ModMask::M1,
-                keysym: XK_UP,
-                action: Action::Focus(Direction::Up),
-            },
-            Keybind {
-                modifiers: ModMask::M1,
-                keysym: XK_DOWN,
-                action: Action::Focus(Direction::Down),
-            },
-            // Alt+Shift+Arrows: swap windows
-            Keybind {
-                modifiers: ModMask::M1 | ModMask::SHIFT,
-                keysym: XK_LEFT,
-                action: Action::Swap(Direction::Left),
-            },
-            Keybind {
-                modifiers: ModMask::M1 | ModMask::SHIFT,
-                keysym: XK_RIGHT,
-                action: Action::Swap(Direction::Right),
-            },
-            Keybind {
-                modifiers: ModMask::M1 | ModMask::SHIFT,
-                keysym: XK_UP,
-                action: Action::Swap(Direction::Up),
-            },
-            Keybind {
-                modifiers: ModMask::M1 | ModMask::SHIFT,
-                keysym: XK_DOWN,
-                action: Action::Swap(Direction::Down),
-            },
-            // Alt+Ctrl+Arrows: resize
-            Keybind {
-                modifiers: ModMask::M1 | ModMask::CONTROL,
-                keysym: XK_LEFT,
-                action: Action::Resize(Direction::Left),
-            },
-            Keybind {
-                modifiers: ModMask::M1 | ModMask::CONTROL,
-                keysym: XK_RIGHT,
-                action: Action::Resize(Direction::Right),
-            },
-            Keybind {
-                modifiers: ModMask::M1 | ModMask::CONTROL,
-                keysym: XK_UP,
-                action: Action::Resize(Direction::Up),
-            },
-            Keybind {
-                modifiers: ModMask::M1 | ModMask::CONTROL,
-                keysym: XK_DOWN,
-                action: Action::Resize(Direction::Down),
-            },
-            // Alt+1-9,0: switch workspace
-            Keybind { modifiers: ModMask::M1, keysym: XK_1, action: Action::SwitchWorkspace(0) },
-            Keybind { modifiers: ModMask::M1, keysym: XK_2, action: Action::SwitchWorkspace(1) },
-            Keybind { modifiers: ModMask::M1, keysym: XK_3, action: Action::SwitchWorkspace(2) },
-            Keybind { modifiers: ModMask::M1, keysym: XK_4, action: Action::SwitchWorkspace(3) },
-            Keybind { modifiers: ModMask::M1, keysym: XK_5, action: Action::SwitchWorkspace(4) },
-            Keybind { modifiers: ModMask::M1, keysym: XK_6, action: Action::SwitchWorkspace(5) },
-            Keybind { modifiers: ModMask::M1, keysym: XK_7, action: Action::SwitchWorkspace(6) },
-            Keybind { modifiers: ModMask::M1, keysym: XK_8, action: Action::SwitchWorkspace(7) },
-            Keybind { modifiers: ModMask::M1, keysym: XK_9, action: Action::SwitchWorkspace(8) },
-            Keybind { modifiers: ModMask::M1, keysym: XK_0, action: Action::SwitchWorkspace(9) },
-            // Alt+Shift+1-9,0: move window to workspace
-            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_1, action: Action::MoveToWorkspace(0) },
-            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_2, action: Action::MoveToWorkspace(1) },
-            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_3, action: Action::MoveToWorkspace(2) },
-            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_4, action: Action::MoveToWorkspace(3) },
-            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_5, action: Action::MoveToWorkspace(4) },
-            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_6, action: Action::MoveToWorkspace(5) },
-            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_7, action: Action::MoveToWorkspace(6) },
-            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_8, action: Action::MoveToWorkspace(7) },
-            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_9, action: Action::MoveToWorkspace(8) },
-            Keybind { modifiers: ModMask::M1 | ModMask::SHIFT, keysym: XK_0, action: Action::MoveToWorkspace(9) },
-        ]
-    }
-
-    /// Set up initial keybinds and grabs.
+    /// Set up initial keybinds and grabs from Lua config.
     pub fn setup_grabs(&mut self) -> Result<()> {
-        for keybind in Self::keybinds() {
+        let state = self.lua_state.lock().unwrap();
+        for keybind in &state.keybinds {
             if let Some(keycode) = self.conn.keycode_from_keysym(keybind.keysym) {
                 self.conn.grab_key(keybind.modifiers, keycode)?;
                 tracing::debug!(
@@ -174,7 +28,7 @@ impl WindowManager {
         }
 
         self.conn.flush()?;
-        tracing::info!("Keybinds registered");
+        tracing::info!("{} keybinds registered", state.keybinds.len());
         Ok(())
     }
 
@@ -334,14 +188,22 @@ impl WindowManager {
                 as u16,
         );
 
-        // Find matching keybind
-        for keybind in Self::keybinds() {
-            let bind_keycode = self.conn.keycode_from_keysym(keybind.keysym);
-            if bind_keycode == Some(keycode) && keybind.modifiers == modifiers {
-                tracing::debug!("Executing action: {:?}", keybind.action);
-                self.execute_action(keybind.action)?;
-                return Ok(());
-            }
+        // Find matching keybind from Lua config
+        let action = {
+            let lua_state = self.lua_state.lock().unwrap();
+            lua_state
+                .keybinds
+                .iter()
+                .find(|kb| {
+                    let bind_keycode = self.conn.keycode_from_keysym(kb.keysym);
+                    bind_keycode == Some(keycode) && kb.modifiers == modifiers
+                })
+                .map(|kb| kb.action.clone())
+        };
+
+        if let Some(action) = action {
+            tracing::debug!("Executing action: {:?}", action);
+            self.execute_action(action)?;
         }
 
         Ok(())
@@ -349,8 +211,9 @@ impl WindowManager {
 
     fn execute_action(&mut self, action: Action) -> Result<()> {
         match action {
-            Action::SpawnTerminal => {
-                self.spawn_terminal();
+            Action::Exec(cmd) => {
+                tracing::info!("Exec: {}", cmd);
+                Command::new("sh").arg("-c").arg(&cmd).spawn().ok();
             }
             Action::CloseWindow => {
                 if let Some(window) = self.focused_window {
@@ -358,42 +221,45 @@ impl WindowManager {
                 }
             }
             Action::Focus(direction) => {
-                self.focus_direction(direction)?;
+                if let Some(dir) = parse_direction(&direction) {
+                    self.focus_direction(dir)?;
+                }
             }
             Action::Swap(direction) => {
-                self.swap_direction(direction)?;
+                if let Some(dir) = parse_direction(&direction) {
+                    self.swap_direction(dir)?;
+                }
             }
-            Action::Resize(direction) => {
-                self.resize_direction(direction)?;
+            Action::Resize(direction, amount) => {
+                if let Some(dir) = parse_direction(&direction) {
+                    self.resize_direction(dir, amount)?;
+                }
             }
             Action::Equalize => {
                 self.equalize()?;
             }
-            Action::SwitchWorkspace(idx) => {
-                self.switch_workspace(idx)?;
+            Action::Workspace(idx) => {
+                // Lua uses 1-based indexing
+                self.switch_workspace(idx.saturating_sub(1))?;
             }
             Action::MoveToWorkspace(idx) => {
-                self.move_to_workspace(idx)?;
+                // Lua uses 1-based indexing
+                self.move_to_workspace(idx.saturating_sub(1))?;
+            }
+            Action::Reload => {
+                self.reload_config()?;
+            }
+            Action::Exit => {
+                tracing::info!("Exit requested");
+                self.running = false;
+            }
+            Action::LuaCallback(index) => {
+                if let Err(e) = self.lua_config.execute_callback(index) {
+                    tracing::error!("Lua callback error: {}", e);
+                }
             }
         }
         Ok(())
-    }
-
-    fn spawn_terminal(&self) {
-        // Try common terminals in order of preference
-        let terminals = ["alacritty", "kitty", "foot", "xterm"];
-
-        for terminal in terminals {
-            match Command::new(terminal).spawn() {
-                Ok(_) => {
-                    tracing::info!("Spawned {}", terminal);
-                    return;
-                }
-                Err(_) => continue,
-            }
-        }
-
-        tracing::warn!("No terminal emulator found");
     }
 
     fn close_window(&mut self, window: u32) -> Result<()> {
@@ -451,18 +317,16 @@ impl WindowManager {
         Ok(())
     }
 
-    fn resize_direction(&mut self, direction: Direction) -> Result<()> {
+    fn resize_direction(&mut self, direction: Direction, delta: f32) -> Result<()> {
         let Some(focused) = self.focused_window else {
             return Ok(());
         };
-
-        const RESIZE_DELTA: f32 = 0.05;
 
         // Resize the split
         if self
             .current_workspace_mut()
             .tree
-            .resize(focused, direction, RESIZE_DELTA)
+            .resize(focused, direction, delta)
         {
             // Re-apply layout
             self.apply_layout()?;
@@ -503,7 +367,11 @@ impl WindowManager {
         self.apply_layout()?;
 
         // Focus the workspace's focused window or first window
-        if let Some(window) = self.current_workspace().focused.or_else(|| self.current_workspace().tree.first_window()) {
+        if let Some(window) = self
+            .current_workspace()
+            .focused
+            .or_else(|| self.current_workspace().tree.first_window())
+        {
             self.set_focus(window)?;
             self.conn.ungrab_button(window)?;
         } else {
@@ -543,7 +411,9 @@ impl WindowManager {
         // Insert into target workspace
         let target_focused = self.workspaces[idx].focused;
         let screen = self.screen_rect();
-        self.workspaces[idx].tree.insert_with_rect(window, target_focused, screen);
+        self.workspaces[idx]
+            .tree
+            .insert_with_rect(window, target_focused, screen);
 
         // Re-apply layout on current workspace
         self.apply_layout()?;
@@ -555,6 +425,35 @@ impl WindowManager {
         }
 
         self.conn.flush()?;
+        Ok(())
+    }
+
+    fn reload_config(&mut self) -> Result<()> {
+        tracing::info!("Reloading configuration");
+
+        // Ungrab all current keys
+        // (We'd need to track grabbed keys to ungrab them properly,
+        // for now we'll just regrab - X11 handles duplicates)
+
+        // Reload Lua config
+        if let Err(e) = self.lua_config.reload() {
+            tracing::error!("Config reload failed: {}", e);
+            return Ok(());
+        }
+
+        // Update config from Lua state
+        {
+            let state = self.lua_state.lock().unwrap();
+            self.config = state.config.clone();
+        }
+
+        // Re-register keybinds
+        self.setup_grabs()?;
+
+        // Re-apply layout with new settings
+        self.apply_layout()?;
+
+        tracing::info!("Configuration reloaded");
         Ok(())
     }
 
@@ -571,5 +470,15 @@ impl WindowManager {
 
         tracing::info!("Event loop exited");
         Ok(())
+    }
+}
+
+fn parse_direction(s: &str) -> Option<Direction> {
+    match s.to_lowercase().as_str() {
+        "left" => Some(Direction::Left),
+        "right" => Some(Direction::Right),
+        "up" => Some(Direction::Up),
+        "down" => Some(Direction::Down),
+        _ => None,
     }
 }
