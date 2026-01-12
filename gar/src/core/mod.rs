@@ -317,22 +317,22 @@ impl WindowManager {
     /// Remove a window from management.
     pub fn unmanage_window(&mut self, window: XWindow) {
         if let Some(win) = self.windows.remove(&window) {
-            tracing::info!("Unmanaging window {}", window);
+            let ws_idx = win.workspace;
+            tracing::info!("Unmanaging window {} from workspace {}", window, ws_idx + 1);
 
+            // Remove from the window's actual workspace (not current_workspace!)
             if win.floating {
-                // Remove from floating list
-                self.current_workspace_mut().remove_floating(window);
+                self.workspaces[ws_idx].remove_floating(window);
             } else {
-                // Remove from BSP tree
-                self.current_workspace_mut().tree.remove(window);
+                self.workspaces[ws_idx].tree.remove(window);
             }
 
             // Update focus if this was the focused window
             if self.focused_window == Some(window) {
-                // Try to focus another window (prefer tiled, then floating)
-                self.focused_window = self.current_workspace().tree.first_window()
-                    .or_else(|| self.current_workspace().floating.last().copied());
-                self.current_workspace_mut().focused = self.focused_window;
+                // Try to focus another window on that workspace
+                self.focused_window = self.workspaces[ws_idx].tree.first_window()
+                    .or_else(|| self.workspaces[ws_idx].floating.last().copied());
+                self.workspaces[ws_idx].focused = self.focused_window;
             }
         }
     }

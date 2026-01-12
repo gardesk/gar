@@ -262,26 +262,26 @@ impl WindowManager {
     }
 
     fn handle_unmap_notify(&mut self, event: UnmapNotifyEvent) -> Result<()> {
-        tracing::debug!("UnmapNotify for window {}", event.window);
+        let window = event.window;
+        tracing::debug!("UnmapNotify for window {}", window);
 
-        // Only unmanage if window is on current workspace
-        // (windows on other workspaces are unmapped due to workspace switching)
-        let on_current = self
-            .windows
-            .get(&event.window)
-            .map(|w| w.workspace == self.focused_workspace)
+        // Check if this window is on a visible workspace (any monitor's active workspace)
+        let is_visible = self.windows.get(&window)
+            .map(|w| self.is_workspace_visible(w.workspace))
             .unwrap_or(false);
 
-        if on_current {
-            // Remove from management
-            self.unmanage_window(event.window);
-
-            // Re-apply layout
+        // Only unmanage if the window was visible - windows on hidden workspaces
+        // are unmapped intentionally by us during workspace switching
+        if is_visible {
+            self.unmanage_window(window);
             self.apply_layout()?;
 
-            // Update focus
-            if let Some(window) = self.focused_window {
-                self.set_focus(window)?;
+            // Focus next window or warp to monitor if none left
+            if let Some(win) = self.focused_window {
+                self.set_focus(win)?;
+            } else {
+                // No windows left, warp to current monitor center
+                self.warp_to_monitor(self.focused_monitor)?;
             }
         }
 
@@ -297,9 +297,12 @@ impl WindowManager {
         // Re-apply layout
         self.apply_layout()?;
 
-        // Update focus
+        // Focus next window or warp to monitor if none left
         if let Some(window) = self.focused_window {
             self.set_focus(window)?;
+        } else {
+            // No windows left, warp to current monitor center
+            self.warp_to_monitor(self.focused_monitor)?;
         }
 
         Ok(())
