@@ -54,8 +54,103 @@ impl WindowManager {
             }
         }
 
+        // Grab Alt+Button1/Button3 on root for floating window move/resize
+        self.conn.grab_mod_buttons()?;
+
         self.conn.flush()?;
         tracing::info!("{} keybinds registered", state.keybinds.len());
+        Ok(())
+    }
+
+    /// Set up EWMH workspace hints for status bar integration.
+    pub fn setup_ewmh_hints(&self) -> Result<()> {
+        // Advertise supported EWMH atoms
+        self.conn.set_ewmh_supported()?;
+
+        // Set number of desktops
+        let num_desktops = self.workspaces.len() as u32;
+        self.conn.set_number_of_desktops(num_desktops)?;
+
+        // Set desktop names
+        let names: Vec<String> = self.workspaces.iter().map(|ws| ws.name.clone()).collect();
+        self.conn.set_desktop_names(&names)?;
+
+        // Set current desktop
+        self.conn.set_current_desktop(self.focused_workspace as u32)?;
+
+        // Set active window (none at startup)
+        self.conn.set_active_window(None)?;
+
+        self.conn.flush()?;
+        tracing::info!("EWMH workspace hints initialized: {} desktops", num_desktops);
+        Ok(())
+    }
+
+    /// Adopt any existing windows that were already mapped before we started.
+    pub fn adopt_existing_windows(&mut self) -> Result<()> {
+        use x11rb::protocol::xproto::MapState;
+
+        // Query children of root window
+        let reply = self.conn.conn.query_tree(self.conn.root)?.reply()?;
+        let mut adopted = 0;
+
+        for &window in &reply.children {
+            // Get window attributes to check if it's mapped and not override-redirect
+            let attrs = match self.conn.conn.get_window_attributes(window)?.reply() {
+                Ok(a) => a,
+                Err(_) => continue, // Window may have been destroyed
+            };
+
+            // Skip override-redirect windows (menus, tooltips, etc.)
+            if attrs.override_redirect {
+                continue;
+            }
+
+            // Only adopt currently mapped windows
+            if attrs.map_state != MapState::VIEWABLE {
+                continue;
+            }
+
+            // Skip if we already manage this window
+            if self.windows.contains_key(&window) {
+                continue;
+            }
+
+            // Subscribe to events on the window
+            self.conn.select_input(
+                window,
+                EventMask::ENTER_WINDOW
+                    | EventMask::FOCUS_CHANGE
+                    | EventMask::PROPERTY_CHANGE
+                    | EventMask::STRUCTURE_NOTIFY,
+            )?;
+
+            // Grab button for click-to-focus
+            self.conn.grab_button(window)?;
+
+            // Check window rules and EWMH hints
+            let rule_actions = self.check_rules(window);
+            let should_float = rule_actions.floating.unwrap_or_else(|| self.conn.should_float(window));
+
+            // Manage the window
+            if should_float {
+                self.manage_window_floating(window);
+            } else {
+                self.manage_window(window);
+            }
+            adopted += 1;
+        }
+
+        if adopted > 0 {
+            self.apply_layout()?;
+            // Focus the first window
+            if let Some(window) = self.focused_window {
+                self.set_focus(window)?;
+                self.conn.ungrab_button(window)?;
+            }
+            tracing::info!("Adopted {} existing windows", adopted);
+        }
+
         Ok(())
     }
 
@@ -103,17 +198,43 @@ impl WindowManager {
         // Grab button for click-to-focus
         self.conn.grab_button(window)?;
 
-        // Manage the window
-        self.manage_window(window);
+        // Check window rules first
+        let rule_actions = self.check_rules(window);
 
-        // Map the window
-        self.conn.map_window(window)?;
+        // Determine target workspace (rule or current)
+        let target_workspace = rule_actions.workspace.unwrap_or(self.focused_workspace + 1);
+        let target_idx = target_workspace.saturating_sub(1).min(self.workspaces.len() - 1);
+
+        // Determine if window should float (rule > ICCCM/EWMH hints)
+        let should_float = rule_actions.floating.unwrap_or_else(|| self.conn.should_float(window));
+
+        // Manage window on target workspace
+        if target_idx != self.focused_workspace {
+            // Window goes to a different workspace
+            if should_float {
+                self.manage_window_floating_on_workspace(window, target_idx);
+            } else {
+                self.manage_window_on_workspace(window, target_idx);
+            }
+            // Don't map - it's on another workspace
+        } else {
+            // Window goes to current workspace
+            if should_float {
+                self.manage_window_floating(window);
+            } else {
+                self.manage_window(window);
+            }
+            // Map the window
+            self.conn.map_window(window)?;
+        }
 
         // Apply layout to all windows
         self.apply_layout()?;
 
-        // Focus the new window
-        self.set_focus(window)?;
+        // Focus the new window (only if on current workspace)
+        if target_idx == self.focused_workspace {
+            self.set_focus(window)?;
+        }
 
         Ok(())
     }
@@ -178,38 +299,46 @@ impl WindowManager {
 
     fn handle_button_press(&mut self, event: ButtonPressEvent) -> Result<()> {
         let window = event.event;
-        tracing::debug!("ButtonPress on window {}, button {}", window, event.detail);
+        let child = event.child;
+        tracing::debug!("ButtonPress on window {}, child {}, button {}", window, child, event.detail);
 
         // Check for mod+click on floating windows (move/resize)
         let has_mod = event.state.contains(x11rb::protocol::xproto::KeyButMask::MOD1);
 
-        if has_mod && self.is_floating(window) {
-            let geometry = self.get_floating_geometry(window);
+        // For Alt+click from root grab, use child window (the window under cursor)
+        let target = if window == self.conn.root && child != 0 {
+            child
+        } else {
+            window
+        };
+
+        if has_mod && self.is_floating(target) {
+            let geometry = self.get_floating_geometry(target);
 
             if event.detail == 1 {
                 // Mod+Button1 = Move
-                tracing::debug!("Starting move for floating window {}", window);
+                tracing::debug!("Starting move for floating window {}", target);
                 self.drag_state = Some(DragState::Move {
-                    window,
+                    window: target,
                     start_x: event.root_x,
                     start_y: event.root_y,
                     start_geometry: geometry,
                 });
                 // Grab pointer for motion events
-                self.conn.grab_pointer(window)?;
+                self.conn.grab_pointer(target)?;
                 return Ok(());
             } else if event.detail == 3 {
                 // Mod+Button3 = Resize
                 let edge = determine_resize_edge(&geometry, event.root_x, event.root_y);
-                tracing::debug!("Starting resize for floating window {}, edge {:?}", window, edge);
+                tracing::debug!("Starting resize for floating window {}, edge {:?}", target, edge);
                 self.drag_state = Some(DragState::Resize {
-                    window,
+                    window: target,
                     start_x: event.root_x,
                     start_y: event.root_y,
                     start_geometry: geometry,
                     edge,
                 });
-                self.conn.grab_pointer(window)?;
+                self.conn.grab_pointer(target)?;
                 return Ok(());
             }
         }
@@ -385,6 +514,9 @@ impl WindowManager {
                     self.toggle_floating(window)?;
                 }
             }
+            Action::CycleFloating => {
+                self.cycle_floating()?;
+            }
             Action::LuaCallback(index) => {
                 if let Err(e) = self.lua_config.execute_callback(index) {
                     tracing::error!("Lua callback error: {}", e);
@@ -397,11 +529,16 @@ impl WindowManager {
     fn close_window(&mut self, window: u32) -> Result<()> {
         tracing::info!("Closing window {}", window);
 
-        // TODO: Send WM_DELETE_WINDOW if supported (ICCCM)
-        // For now, just kill the client
-        self.conn.conn.kill_client(window)?;
-        self.conn.sync()?;
+        // Try graceful ICCCM close first
+        if self.conn.supports_delete_window(window) {
+            tracing::debug!("Window {} supports WM_DELETE_WINDOW, sending graceful close", window);
+            self.conn.send_delete_window(window)?;
+        } else {
+            tracing::debug!("Window {} doesn't support WM_DELETE_WINDOW, using kill_client", window);
+            self.conn.conn.kill_client(window)?;
+        }
 
+        self.conn.flush()?;
         Ok(())
     }
 
@@ -482,26 +619,30 @@ impl WindowManager {
 
         tracing::info!("Switching to workspace {}", idx + 1);
 
-        // Hide windows on current workspace
-        for window in self.current_workspace().tree.windows() {
+        // Hide all windows on current workspace (tiled + floating)
+        for window in self.current_workspace().all_windows() {
             self.conn.unmap_window(window)?;
         }
 
         // Switch workspace
         self.focused_workspace = idx;
 
-        // Show windows on new workspace
-        for window in self.current_workspace().tree.windows() {
+        // Update EWMH _NET_CURRENT_DESKTOP
+        self.conn.set_current_desktop(idx as u32)?;
+
+        // Show all windows on new workspace (tiled + floating)
+        for window in self.current_workspace().all_windows() {
             self.conn.map_window(window)?;
         }
 
         // Apply layout and update focus
         self.apply_layout()?;
 
-        // Focus the workspace's focused window or first window
+        // Focus the workspace's focused window, preferring floating on top
         if let Some(window) = self
             .current_workspace()
             .focused
+            .or_else(|| self.current_workspace().floating.last().copied())
             .or_else(|| self.current_workspace().tree.first_window())
         {
             self.set_focus(window)?;
@@ -523,13 +664,20 @@ impl WindowManager {
             return Ok(());
         };
 
-        tracing::info!("Moving window {} to workspace {}", window, idx + 1);
+        let is_floating = self.windows.get(&window).map(|w| w.floating).unwrap_or(false);
 
-        // Remove from current workspace tree
-        self.current_workspace_mut().tree.remove(window);
+        tracing::info!("Moving window {} to workspace {} (floating: {})", window, idx + 1, is_floating);
+
+        // Remove from current workspace (tree or floating list)
+        if is_floating {
+            self.current_workspace_mut().remove_floating(window);
+        } else {
+            self.current_workspace_mut().tree.remove(window);
+        }
 
         // Update focus on current workspace
-        self.focused_window = self.current_workspace().tree.first_window();
+        self.focused_window = self.current_workspace().tree.first_window()
+            .or_else(|| self.current_workspace().floating.last().copied());
         self.current_workspace_mut().focused = self.focused_window;
 
         // Update window's workspace tracking
@@ -537,15 +685,22 @@ impl WindowManager {
             win.workspace = idx;
         }
 
+        // Update EWMH _NET_WM_DESKTOP
+        self.conn.set_window_desktop(window, idx as u32)?;
+
         // Hide the window (it's moving to another workspace)
         self.conn.unmap_window(window)?;
 
         // Insert into target workspace
-        let target_focused = self.workspaces[idx].focused;
-        let screen = self.screen_rect();
-        self.workspaces[idx]
-            .tree
-            .insert_with_rect(window, target_focused, screen);
+        if is_floating {
+            self.workspaces[idx].add_floating(window);
+        } else {
+            let target_focused = self.workspaces[idx].focused;
+            let screen = self.screen_rect();
+            self.workspaces[idx]
+                .tree
+                .insert_with_rect(window, target_focused, screen);
+        }
 
         // Re-apply layout on current workspace
         self.apply_layout()?;
@@ -595,6 +750,12 @@ impl WindowManager {
         // Set up keybinds
         self.setup_grabs()?;
 
+        // Set up EWMH workspace hints
+        self.setup_ewmh_hints()?;
+
+        // Adopt any existing windows
+        self.adopt_existing_windows()?;
+
         while self.running {
             let event = self.conn.conn.wait_for_event()?;
             self.handle_event(event)?;
@@ -616,20 +777,20 @@ impl WindowManager {
     fn get_floating_geometry(&self, window: u32) -> Rect {
         self.windows
             .get(&window)
-            .map(|w| w.geometry)
+            .map(|w| w.floating_geometry)
             .unwrap_or_default()
     }
 
     fn set_floating_position(&mut self, window: u32, x: i16, y: i16) -> Result<()> {
         if let Some(win) = self.windows.get_mut(&window) {
-            win.geometry.x = x;
-            win.geometry.y = y;
+            win.floating_geometry.x = x;
+            win.floating_geometry.y = y;
             self.conn.configure_window(
                 window,
                 x,
                 y,
-                win.geometry.width,
-                win.geometry.height,
+                win.floating_geometry.width,
+                win.floating_geometry.height,
                 self.config.border_width,
             )?;
             self.conn.flush()?;
@@ -639,7 +800,7 @@ impl WindowManager {
 
     fn set_floating_geometry(&mut self, window: u32, x: i16, y: i16, w: u16, h: u16) -> Result<()> {
         if let Some(win) = self.windows.get_mut(&window) {
-            win.geometry = Rect::new(x, y, w, h);
+            win.floating_geometry = Rect::new(x, y, w, h);
             self.conn.configure_window(
                 window,
                 x,
@@ -654,33 +815,84 @@ impl WindowManager {
     }
 
     fn raise_window(&mut self, window: u32) -> Result<()> {
+        // Update stacking order in workspace's floating list
+        self.current_workspace_mut().raise_floating(window);
+
+        // Raise in X11
         let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
         self.conn.conn.configure_window(window, &aux)?;
         self.conn.flush()?;
         Ok(())
     }
 
-    fn toggle_floating(&mut self, window: u32) -> Result<()> {
-        let Some(win) = self.windows.get_mut(&window) else {
+    /// Cycle through floating windows on the current workspace.
+    fn cycle_floating(&mut self) -> Result<()> {
+        let floating = &self.current_workspace().floating;
+        if floating.is_empty() {
+            tracing::debug!("No floating windows to cycle");
             return Ok(());
+        }
+
+        // Find current position in floating list
+        let current_idx = self.focused_window
+            .and_then(|w| floating.iter().position(|&fw| fw == w));
+
+        // Get next floating window (wrap around)
+        let next_idx = match current_idx {
+            Some(idx) => (idx + 1) % floating.len(),
+            None => 0, // Not focused on a floating window, focus the first one
         };
 
-        if win.floating {
+        let next_window = floating[next_idx];
+
+        // Regrab button on old focused window
+        if let Some(old) = self.focused_window {
+            self.conn.grab_button(old)?;
+        }
+
+        // Focus and raise the next floating window
+        self.set_focus(next_window)?;
+        self.conn.ungrab_button(next_window)?;
+        self.raise_window(next_window)?;
+
+        tracing::debug!("Cycled to floating window {} (idx {})", next_window, next_idx);
+        Ok(())
+    }
+
+    fn toggle_floating(&mut self, window: u32) -> Result<()> {
+        // Check if window is managed
+        let Some(win_state) = self.windows.get(&window) else {
+            tracing::warn!("toggle_floating: window {} not managed", window);
+            return Ok(());
+        };
+        let is_floating = win_state.floating;
+
+        tracing::debug!(
+            "toggle_floating: window={}, is_floating={}, in_tree={}, in_floating_list={}",
+            window,
+            is_floating,
+            self.current_workspace().tree.contains(window),
+            self.current_workspace().floating.contains(&window)
+        );
+
+        if is_floating {
             // Return to tiled
             tracing::info!("Returning window {} to tiled", window);
-            win.floating = false;
+
+            // Update window state
+            if let Some(win) = self.windows.get_mut(&window) {
+                win.floating = false;
+            }
 
             // Remove from floating list
-            self.current_workspace_mut()
-                .floating
-                .retain(|w| w.id != window);
+            self.current_workspace_mut().remove_floating(window);
 
-            // Insert back into BSP tree
-            let focused = self.current_workspace().focused;
+            // Find a target window to insert next to (not ourselves)
+            let target = self.current_workspace().tree.first_window();
             let screen = self.screen_rect();
             self.current_workspace_mut()
                 .tree
-                .insert_with_rect(window, focused, screen);
+                .insert_with_rect(window, target, screen);
 
             // Re-apply layout
             self.apply_layout()?;
@@ -688,44 +900,37 @@ impl WindowManager {
             // Make floating
             tracing::info!("Floating window {}", window);
 
-            // Get current geometry before removing from tree
+            // Check if window is actually in the tree
+            if !self.current_workspace().tree.contains(window) {
+                tracing::warn!("toggle_floating: window {} not in tree, cannot float", window);
+                return Ok(());
+            }
+
+            // Use a centered floating geometry (80% of screen size, centered)
             let screen = self.screen_rect();
-            let geometries = self.current_workspace().tree.calculate_geometries(screen);
-            let geometry = geometries
-                .iter()
-                .find(|(w, _)| *w == window)
-                .map(|(_, r)| *r)
-                .unwrap_or_else(|| Rect::new(100, 100, 640, 480));
+            let float_w = (screen.width * 4 / 5).max(400);
+            let float_h = (screen.height * 4 / 5).max(300);
+            let float_x = screen.x + (screen.width as i16 - float_w as i16) / 2;
+            let float_y = screen.y + (screen.height as i16 - float_h as i16) / 2;
+            let geometry = Rect::new(float_x, float_y, float_w, float_h);
+
+            tracing::debug!("Floating geometry: {:?}", geometry);
 
             // Remove from BSP tree
-            self.current_workspace_mut().tree.remove(window);
+            let removed = self.current_workspace_mut().tree.remove(window);
+            tracing::debug!("Removed from tree: {}", removed);
 
-            // Mark as floating and store geometry
-            let win = self.windows.get_mut(&window).unwrap();
-            win.floating = true;
-            win.geometry = geometry;
+            // Update window state with floating geometry
+            if let Some(win) = self.windows.get_mut(&window) {
+                win.floating = true;
+                win.floating_geometry = geometry;
+            }
 
-            // Add to floating list
-            let workspace_idx = self.focused_workspace;
-            self.current_workspace_mut()
-                .floating
-                .push(crate::core::Window::new(window, workspace_idx));
+            // Add to floating list (on top)
+            self.current_workspace_mut().add_floating(window);
 
-            // Re-apply layout for tiled windows
+            // Re-apply layout (this will configure the floating window and stack it)
             self.apply_layout()?;
-
-            // Configure floating window to its geometry
-            self.conn.configure_window(
-                window,
-                geometry.x,
-                geometry.y,
-                geometry.width,
-                geometry.height,
-                self.config.border_width,
-            )?;
-
-            // Raise floating window above tiled
-            self.raise_window(window)?;
         }
 
         Ok(())

@@ -1,6 +1,6 @@
 mod lua;
 
-pub use lua::{Action, Keybind, LuaConfig, LuaState};
+pub use lua::{Action, Keybind, LuaConfig, LuaState, RuleActions, WindowMatch, WindowRule};
 
 #[derive(Debug, Clone)]
 pub struct Config {

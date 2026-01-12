@@ -5,8 +5,8 @@
 gar.set("border_width", 2)
 gar.set("border_color_focused", "#5294e2")
 gar.set("border_color_unfocused", "#2d2d2d")
-gar.set("gap_inner", 0)
-gar.set("gap_outer", 0)
+gar.set("gap_inner", 8)
+gar.set("gap_outer", 8)
 
 -- Mod key: "mod" = Super/Win, "alt" = Alt
 -- Using alt for testing in nested X (i3 grabs super)
@@ -61,7 +61,10 @@ gar.bind(mod .. "+ctrl+j", gar.resize("down", 0.05))
 gar.bind(mod .. "+e", gar.equalize)
 
 -- Toggle floating
-gar.bind(mod .. "+shift+space", gar.toggle_floating)
+gar.bind(mod .. "+f", gar.toggle_floating)
+
+-- Cycle through floating windows
+gar.bind(mod .. "+Tab", gar.cycle_floating)
 
 -- Workspaces
 for i = 1, 9 do

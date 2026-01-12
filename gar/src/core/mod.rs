@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use x11rb::protocol::xproto::Window as XWindow;
 
-use crate::config::{Config, LuaConfig, LuaState};
+use crate::config::{Config, LuaConfig, LuaState, RuleActions, WindowMatch};
 use crate::x11::Connection;
 use crate::x11::events::DragState;
 use crate::Result;
@@ -96,11 +96,14 @@ impl WindowManager {
             return;
         }
 
-        tracing::info!("Managing window {}", window);
+        tracing::info!("Managing window {} (tiled)", window);
 
         // Track the window with current workspace
         let win = Window::new(window, self.focused_workspace);
         self.windows.insert(window, win);
+
+        // Set EWMH _NET_WM_DESKTOP
+        let _ = self.conn.set_window_desktop(window, self.focused_workspace as u32);
 
         // Insert into current workspace's tree with smart splitting
         let focused = self.current_workspace().focused;
@@ -112,20 +115,136 @@ impl WindowManager {
         self.focused_window = Some(window);
     }
 
+    /// Add a window to management on a specific workspace.
+    pub fn manage_window_on_workspace(&mut self, window: XWindow, workspace_idx: usize) {
+        if !self.should_manage(window) {
+            return;
+        }
+
+        tracing::info!("Managing window {} on workspace {} (tiled)", window, workspace_idx + 1);
+
+        // Track the window
+        let win = Window::new(window, workspace_idx);
+        self.windows.insert(window, win);
+
+        // Set EWMH _NET_WM_DESKTOP
+        let _ = self.conn.set_window_desktop(window, workspace_idx as u32);
+
+        // Insert into target workspace's BSP tree
+        let focused = self.workspaces[workspace_idx].focused;
+        let screen = self.screen_rect();
+        self.workspaces[workspace_idx].tree.insert_with_rect(window, focused, screen);
+    }
+
+    /// Add a window to management as a floating window on a specific workspace.
+    pub fn manage_window_floating_on_workspace(&mut self, window: XWindow, workspace_idx: usize) {
+        if !self.should_manage(window) {
+            return;
+        }
+
+        tracing::info!("Managing window {} on workspace {} (floating)", window, workspace_idx + 1);
+
+        // Calculate floating geometry
+        let screen = self.screen_rect();
+        let float_width = (screen.width * 4 / 5).max(400);
+        let float_height = (screen.height * 4 / 5).max(300);
+        let float_x = screen.x + (screen.width as i16 - float_width as i16) / 2;
+        let float_y = screen.y + (screen.height as i16 - float_height as i16) / 2;
+
+        // Track the window with floating state
+        let mut win = Window::new(window, workspace_idx);
+        win.floating = true;
+        win.floating_geometry = Rect::new(float_x, float_y, float_width, float_height);
+        self.windows.insert(window, win);
+
+        // Set EWMH _NET_WM_DESKTOP
+        let _ = self.conn.set_window_desktop(window, workspace_idx as u32);
+
+        // Add to target workspace's floating list
+        self.workspaces[workspace_idx].add_floating(window);
+    }
+
+    /// Add a window to management as a floating window.
+    pub fn manage_window_floating(&mut self, window: XWindow) {
+        if !self.should_manage(window) {
+            return;
+        }
+
+        tracing::info!("Managing window {} (floating)", window);
+
+        // Calculate centered floating geometry
+        let screen = self.screen_rect();
+        let float_width = 640.min(screen.width.saturating_sub(40));
+        let float_height = 480.min(screen.height.saturating_sub(40));
+        let float_x = screen.x + (screen.width as i16 - float_width as i16) / 2;
+        let float_y = screen.y + (screen.height as i16 - float_height as i16) / 2;
+
+        // Track the window with floating state
+        let mut win = Window::new(window, self.focused_workspace);
+        win.floating = true;
+        win.floating_geometry = Rect::new(float_x, float_y, float_width, float_height);
+        self.windows.insert(window, win);
+
+        // Set EWMH _NET_WM_DESKTOP
+        let _ = self.conn.set_window_desktop(window, self.focused_workspace as u32);
+
+        // Add to floating list (on top)
+        self.current_workspace_mut().add_floating(window);
+        self.current_workspace_mut().focused = Some(window);
+        self.focused_window = Some(window);
+    }
+
     /// Remove a window from management.
     pub fn unmanage_window(&mut self, window: XWindow) {
-        if self.windows.remove(&window).is_some() {
+        if let Some(win) = self.windows.remove(&window) {
             tracing::info!("Unmanaging window {}", window);
 
-            // Remove from workspace tree
-            self.current_workspace_mut().tree.remove(window);
+            if win.floating {
+                // Remove from floating list
+                self.current_workspace_mut().remove_floating(window);
+            } else {
+                // Remove from BSP tree
+                self.current_workspace_mut().tree.remove(window);
+            }
 
             // Update focus if this was the focused window
             if self.focused_window == Some(window) {
-                self.focused_window = self.current_workspace().tree.first_window();
+                // Try to focus another window (prefer tiled, then floating)
+                self.focused_window = self.current_workspace().tree.first_window()
+                    .or_else(|| self.current_workspace().floating.last().copied());
                 self.current_workspace_mut().focused = self.focused_window;
             }
         }
+    }
+
+    /// Check window rules and return actions to apply.
+    pub fn check_rules(&self, window: XWindow) -> RuleActions {
+        let state = self.lua_state.lock().unwrap();
+
+        // Get window properties
+        let (instance, class) = self.conn.get_wm_class(window).unwrap_or_default();
+        let title = self.conn.get_window_title(window).unwrap_or_default();
+
+        tracing::debug!("Checking rules for window {}: class={}, instance={}, title={}",
+            window, class, instance, title);
+
+        let mut result = RuleActions::default();
+
+        for rule in &state.rules {
+            let matches = rule_matches(&rule.match_criteria, &class, &instance, &title);
+            if matches {
+                tracing::info!("Rule matched for window {}: {:?}", window, rule.actions);
+                // Merge actions (later rules override earlier ones)
+                if rule.actions.floating.is_some() {
+                    result.floating = rule.actions.floating;
+                }
+                if rule.actions.workspace.is_some() {
+                    result.workspace = rule.actions.workspace;
+                }
+            }
+        }
+
+        result
     }
 
     /// Set focus to a window.
@@ -133,6 +252,7 @@ impl WindowManager {
         self.focused_window = Some(window);
         self.current_workspace_mut().focused = Some(window);
         self.conn.set_focus(window)?;
+        self.conn.set_active_window(Some(window))?;
         self.update_borders()?;
         Ok(())
     }
@@ -144,7 +264,8 @@ impl WindowManager {
         let unfocused_color = self.config.border_color_unfocused;
         let border_width = self.config.border_width;
 
-        for &window in self.current_workspace().tree.windows().iter() {
+        // Update borders for all windows (tiled + floating)
+        for window in self.current_workspace().all_windows() {
             let color = if Some(window) == focused {
                 focused_color
             } else {
@@ -156,33 +277,126 @@ impl WindowManager {
     }
 
     /// Apply the current layout to all windows.
+    /// Stacking order: tiled windows at bottom, floating windows on top (in list order).
     pub fn apply_layout(&mut self) -> Result<()> {
+        use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt, StackMode};
+
         let border_width = self.config.border_width;
+        let gap_outer = self.config.gap_outer as i16;
+        let gap_inner = self.config.gap_inner as i16;
+        let half_gap = gap_inner / 2;
 
-        // Calculate usable area (screen minus borders)
+        // Apply outer gap to screen rect
         let screen = self.screen_rect();
+        let work_area = Rect::new(
+            screen.x + gap_outer,
+            screen.y + gap_outer,
+            screen.width.saturating_sub(2 * gap_outer as u16),
+            screen.height.saturating_sub(2 * gap_outer as u16),
+        );
 
-        // Get geometries from the tree
-        let geometries = self.current_workspace().tree.calculate_geometries(screen);
+        tracing::debug!(
+            "apply_layout: screen={:?}, work_area={:?}, tiled_count={}, floating_count={}",
+            screen,
+            work_area,
+            self.current_workspace().tree.window_count(),
+            self.current_workspace().floating.len()
+        );
 
-        // Apply geometries to windows
-        for (window, rect) in geometries {
-            // Account for border width in geometry
-            let adjusted_width = rect.width.saturating_sub(2 * border_width as u16);
-            let adjusted_height = rect.height.saturating_sub(2 * border_width as u16);
+        // 1. Configure tiled windows from the BSP tree
+        let geometries = self.current_workspace().tree.calculate_geometries(work_area);
+        for (window, rect) in &geometries {
+            // Apply inner gap: shrink each window by half_gap on each side
+            let gapped_x = rect.x + half_gap;
+            let gapped_y = rect.y + half_gap;
+            let gapped_width = rect.width.saturating_sub(gap_inner as u16);
+            let gapped_height = rect.height.saturating_sub(gap_inner as u16);
+
+            // Account for border width
+            let final_width = gapped_width.saturating_sub(2 * border_width as u16);
+            let final_height = gapped_height.saturating_sub(2 * border_width as u16);
+
+            tracing::debug!(
+                "apply_layout: TILED window={} at ({}, {}) size {}x{}",
+                window, gapped_x, gapped_y, final_width.max(1), final_height.max(1)
+            );
 
             self.conn.configure_window(
-                window,
-                rect.x,
-                rect.y,
-                adjusted_width.max(1),
-                adjusted_height.max(1),
+                *window,
+                gapped_x,
+                gapped_y,
+                final_width.max(1),
+                final_height.max(1),
                 border_width,
             )?;
+        }
+
+        // 2. Configure floating windows and stack them above tiled
+        // Get floating window IDs (in stacking order: first = bottom, last = top)
+        let floating_ids: Vec<XWindow> = self.current_workspace().floating.clone();
+
+        for window_id in floating_ids {
+            // Get the window's floating geometry from our state
+            if let Some(win) = self.windows.get(&window_id) {
+                let geom = win.floating_geometry;
+                let adjusted_width = geom.width.saturating_sub(2 * border_width as u16);
+                let adjusted_height = geom.height.saturating_sub(2 * border_width as u16);
+
+                tracing::debug!(
+                    "apply_layout: FLOATING window={} at ({}, {}) size {}x{} (raising)",
+                    window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
+                );
+
+                // Configure geometry
+                self.conn.configure_window(
+                    window_id,
+                    geom.x,
+                    geom.y,
+                    adjusted_width.max(1),
+                    adjusted_height.max(1),
+                    border_width,
+                )?;
+
+                // Raise to top of stack (each subsequent window goes above the previous)
+                let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+                self.conn.conn.configure_window(window_id, &aux)?;
+            } else {
+                tracing::warn!("apply_layout: floating window {} not in windows map!", window_id);
+            }
         }
 
         self.update_borders()?;
         self.conn.flush()?;
         Ok(())
     }
+}
+
+/// Check if window properties match rule criteria (case-insensitive substring match).
+fn rule_matches(criteria: &WindowMatch, class: &str, instance: &str, title: &str) -> bool {
+    let class_lower = class.to_lowercase();
+    let instance_lower = instance.to_lowercase();
+    let title_lower = title.to_lowercase();
+
+    // All specified criteria must match
+    if let Some(ref c) = criteria.class {
+        let c_lower: String = c.to_lowercase();
+        if !class_lower.contains(&c_lower) {
+            return false;
+        }
+    }
+    if let Some(ref i) = criteria.instance {
+        let i_lower: String = i.to_lowercase();
+        if !instance_lower.contains(&i_lower) {
+            return false;
+        }
+    }
+    if let Some(ref t) = criteria.title {
+        let t_lower: String = t.to_lowercase();
+        if !title_lower.contains(&t_lower) {
+            return false;
+        }
+    }
+
+    // At least one criterion must be specified
+    criteria.class.is_some() || criteria.instance.is_some() || criteria.title.is_some()
 }

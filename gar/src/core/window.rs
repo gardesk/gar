@@ -5,7 +5,8 @@ use super::tree::Rect;
 #[derive(Debug, Clone)]
 pub struct Window {
     pub id: XWindow,
-    pub geometry: Rect,
+    /// Geometry for floating mode (position and size when floating)
+    pub floating_geometry: Rect,
     pub mapped: bool,
     pub focused: bool,
     pub floating: bool,
@@ -17,7 +18,7 @@ impl Window {
     pub fn new(id: XWindow, workspace: usize) -> Self {
         Self {
             id,
-            geometry: Rect::new(0, 0, 1, 1),
+            floating_geometry: Rect::new(0, 0, 640, 480),
             mapped: false,
             focused: false,
             floating: false,

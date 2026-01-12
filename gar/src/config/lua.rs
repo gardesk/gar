@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -20,6 +21,7 @@ pub enum Action {
     Reload,
     Exit,
     ToggleFloating,
+    CycleFloating,
     LuaCallback(usize), // Index into callback registry
 }
 
@@ -31,11 +33,35 @@ pub struct Keybind {
     pub action: Action,
 }
 
+/// Window rule matching criteria
+#[derive(Debug, Clone, Default)]
+pub struct WindowMatch {
+    pub class: Option<String>,
+    pub instance: Option<String>,
+    pub title: Option<String>,
+}
+
+/// Actions to apply when a rule matches
+#[derive(Debug, Clone, Default)]
+pub struct RuleActions {
+    pub floating: Option<bool>,
+    pub workspace: Option<usize>,
+}
+
+/// A window rule: if match criteria are met, apply actions
+#[derive(Debug, Clone)]
+pub struct WindowRule {
+    pub match_criteria: WindowMatch,
+    pub actions: RuleActions,
+}
+
 /// Shared state between Lua and Rust
 pub struct LuaState {
     pub config: Config,
     pub keybinds: Vec<Keybind>,
     pub callbacks: Vec<mlua::RegistryKey>,
+    pub rules: Vec<WindowRule>,
+    pub exec_once_cmds: HashSet<String>,
 }
 
 impl Default for LuaState {
@@ -44,6 +70,8 @@ impl Default for LuaState {
             config: Config::default(),
             keybinds: Vec::new(),
             callbacks: Vec::new(),
+            rules: Vec::new(),
+            exec_once_cmds: HashSet::new(),
         }
     }
 }
@@ -71,19 +99,12 @@ impl LuaConfig {
         // Set up the gar global table with all APIs
         self.setup_api()?;
 
-        // Find config file
-        let config_path = Self::find_config();
+        // Find or create config file
+        let config_path = Self::find_or_create_config()?;
 
-        let source = match config_path {
-            Some(path) => {
-                tracing::info!("Loading config from {:?}", path);
-                std::fs::read_to_string(&path).map_err(|e| mlua::Error::external(e))?
-            }
-            None => {
-                tracing::info!("Using default config");
-                include_str!("../../config/default.lua").to_string()
-            }
-        };
+        tracing::info!("Loading config from {:?}", config_path);
+        let source = std::fs::read_to_string(&config_path)
+            .map_err(|e| mlua::Error::external(e))?;
 
         self.lua.load(&source).exec()?;
 
@@ -96,12 +117,13 @@ impl LuaConfig {
         Ok(())
     }
 
-    /// Reload configuration (clears existing keybinds)
+    /// Reload configuration (clears existing keybinds and rules)
     pub fn reload(&self) -> LuaResult<()> {
         {
             let mut state = self.state.lock().unwrap();
             state.keybinds.clear();
             state.callbacks.clear();
+            state.rules.clear();
             state.config = Config::default();
         }
         self.load()
@@ -118,10 +140,31 @@ impl LuaConfig {
         Ok(())
     }
 
-    fn find_config() -> Option<PathBuf> {
-        dirs::config_dir()
-            .map(|p| p.join("gar/init.lua"))
-            .filter(|p| p.exists())
+    /// Find user config or create it from defaults if it doesn't exist.
+    fn find_or_create_config() -> LuaResult<PathBuf> {
+        let config_dir = dirs::config_dir()
+            .ok_or_else(|| mlua::Error::external("Could not determine config directory"))?
+            .join("gar");
+        let config_path = config_dir.join("init.lua");
+
+        if config_path.exists() {
+            return Ok(config_path);
+        }
+
+        // Create config directory if needed
+        if !config_dir.exists() {
+            std::fs::create_dir_all(&config_dir)
+                .map_err(|e| mlua::Error::external(format!("Failed to create config dir: {}", e)))?;
+            tracing::info!("Created config directory: {:?}", config_dir);
+        }
+
+        // Write default config
+        let default_config = include_str!("../../config/default.lua");
+        std::fs::write(&config_path, default_config)
+            .map_err(|e| mlua::Error::external(format!("Failed to write default config: {}", e)))?;
+        tracing::info!("Created default config at {:?}", config_path);
+
+        Ok(config_path)
     }
 
     fn setup_api(&self) -> LuaResult<()> {
@@ -135,6 +178,9 @@ impl LuaConfig {
 
         // gar.exec(cmd)
         self.register_exec(&gar)?;
+
+        // gar.rule(match, actions)
+        self.register_rule(&gar)?;
 
         // Built-in action functions
         self.register_actions(&gar)?;
@@ -221,6 +267,7 @@ impl LuaConfig {
                             "exit" => Action::Exit,
                             "equalize" => Action::Equalize,
                             "toggle_floating" => Action::ToggleFloating,
+                            "cycle_floating" => Action::CycleFloating,
                             "focus" => {
                                 let dir: String = t.get("direction").unwrap_or_default();
                                 Action::Focus(dir)
@@ -277,7 +324,63 @@ impl LuaConfig {
                 .ok();
             Ok(())
         })?;
-        gar.set("exec", exec_fn)
+        gar.set("exec", exec_fn)?;
+
+        // gar.exec_once(cmd) - only run if not already run this session
+        let state = Arc::clone(&self.state);
+        let exec_once_fn = self.lua.create_function(move |_, cmd: String| {
+            let mut state = state.lock().unwrap();
+            if state.exec_once_cmds.contains(&cmd) {
+                tracing::debug!("exec_once: skipping already-run command: {}", cmd);
+                return Ok(());
+            }
+            tracing::info!("exec_once: {}", cmd);
+            state.exec_once_cmds.insert(cmd.clone());
+            drop(state); // Release lock before spawning
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .spawn()
+                .ok();
+            Ok(())
+        })?;
+        gar.set("exec_once", exec_once_fn)
+    }
+
+    fn register_rule(&self, gar: &Table) -> LuaResult<()> {
+        let state = Arc::clone(&self.state);
+        // gar.rule({ class = "Firefox" }, { floating = true, workspace = 2 })
+        let rule_fn = self.lua.create_function(move |_, (match_table, actions_table): (Table, Table)| {
+            let mut match_criteria = WindowMatch::default();
+            let mut actions = RuleActions::default();
+
+            // Parse match criteria
+            if let Ok(class) = match_table.get::<String>("class") {
+                match_criteria.class = Some(class);
+            }
+            if let Ok(instance) = match_table.get::<String>("instance") {
+                match_criteria.instance = Some(instance);
+            }
+            if let Ok(title) = match_table.get::<String>("title") {
+                match_criteria.title = Some(title);
+            }
+
+            // Parse actions
+            if let Ok(floating) = actions_table.get::<bool>("floating") {
+                actions.floating = Some(floating);
+            }
+            if let Ok(workspace) = actions_table.get::<usize>("workspace") {
+                actions.workspace = Some(workspace);
+            }
+
+            let rule = WindowRule { match_criteria, actions };
+            tracing::debug!("Registered rule: {:?}", rule);
+
+            let mut state = state.lock().unwrap();
+            state.rules.push(rule);
+            Ok(())
+        })?;
+        gar.set("rule", rule_fn)
     }
 
     fn register_actions(&self, gar: &Table) -> LuaResult<()> {
@@ -305,6 +408,11 @@ impl LuaConfig {
         let toggle_floating = self.lua.create_table()?;
         toggle_floating.set("action", "toggle_floating")?;
         gar.set("toggle_floating", toggle_floating)?;
+
+        // gar.cycle_floating
+        let cycle_floating = self.lua.create_table()?;
+        cycle_floating.set("action", "cycle_floating")?;
+        gar.set("cycle_floating", cycle_floating)?;
 
         // gar.focus(direction) - creates action
         let focus_fn = self.lua.create_function(|lua, direction: String| {
