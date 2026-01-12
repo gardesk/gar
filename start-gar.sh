@@ -86,8 +86,9 @@ xrandr \\
 
 # Launch compositor before WM (for proper screen repainting)
 # --use-ewmh-active-win uses _NET_ACTIVE_WINDOW for focus detection
+# --backend glx is required for picom v12+ (no longer has a default)
 if command -v picom > /dev/null 2>&1; then
-    picom -b --use-ewmh-active-win &
+    picom -b --backend glx --use-ewmh-active-win &
     sleep 0.1
 fi
 

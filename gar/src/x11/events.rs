@@ -134,7 +134,7 @@ impl WindowManager {
             let should_float = rule_actions.floating.unwrap_or_else(|| self.conn.should_float(window));
 
             // Subscribe to events on the window
-            // Floating windows get POINTER_MOTION for edge resize cursors
+            // Floating windows get POINTER_MOTION for edge resize cursor feedback
             let base_events = EventMask::ENTER_WINDOW
                 | EventMask::FOCUS_CHANGE
                 | EventMask::PROPERTY_CHANGE
@@ -175,6 +175,19 @@ impl WindowManager {
     }
 
     pub fn handle_event(&mut self, event: Event) -> Result<()> {
+        // Log events to debug cursor flicker
+        match &event {
+            Event::MotionNotify(e) => {
+                tracing::info!("MOTION: window={} pos=({},{})", e.event, e.root_x, e.root_y);
+            }
+            Event::EnterNotify(e) => {
+                tracing::info!("ENTER: window={}", e.event);
+            }
+            Event::ButtonPress(e) => {
+                tracing::info!("BUTTON: window={} btn={}", e.event, e.detail);
+            }
+            _ => {}
+        }
         match event {
             Event::MapRequest(e) => self.handle_map_request(e)?,
             Event::ConfigureRequest(e) => self.handle_configure_request(e)?,
@@ -256,7 +269,7 @@ impl WindowManager {
         let should_float = rule_actions.floating.unwrap_or_else(|| self.conn.should_float(window));
 
         // Subscribe to events on the window
-        // Floating windows get POINTER_MOTION for edge resize cursors
+        // Floating windows get POINTER_MOTION for edge resize cursor feedback
         let base_events = EventMask::ENTER_WINDOW
             | EventMask::FOCUS_CHANGE
             | EventMask::PROPERTY_CHANGE
@@ -449,8 +462,10 @@ impl WindowManager {
                     start_y: event.root_y,
                     start_geometry: geometry,
                 });
-                // Grab pointer for motion events
-                self.conn.grab_pointer(target)?;
+                // Clear window cursor to prevent conflict with grab cursor
+                self.conn.clear_window_cursor(target)?;
+                // Grab pointer for motion events (use fleur/move cursor)
+                self.conn.grab_pointer(Some(self.conn.cursor_move))?;
                 return Ok(());
             } else if event.detail == 3 {
                 // Mod+Button3 = Resize (quadrant-based edge detection)
@@ -463,7 +478,10 @@ impl WindowManager {
                     start_geometry: geometry,
                     edge,
                 });
-                self.conn.grab_pointer(target)?;
+                // Clear window cursor to prevent conflict with grab cursor
+                self.conn.clear_window_cursor(target)?;
+                let cursor = self.cursor_for_edge(edge);
+                self.conn.grab_pointer(Some(cursor))?;
                 return Ok(());
             }
         }
@@ -492,7 +510,10 @@ impl WindowManager {
                     edge,
                 });
                 tracing::debug!("Grabbing pointer for resize, geometry={:?}", geometry);
-                self.conn.grab_pointer(window)?;
+                // Clear window cursor to prevent conflict with grab cursor
+                self.conn.clear_window_cursor(window)?;
+                let cursor = self.cursor_for_edge(edge);
+                self.conn.grab_pointer(Some(cursor))?;
                 self.conn.flush()?;
                 return Ok(());
             }
@@ -549,11 +570,19 @@ impl WindowManager {
     fn handle_button_release(&mut self, event: ButtonReleaseEvent) -> Result<()> {
         tracing::debug!("ButtonRelease: button={}, window={}, in_drag={}",
             event.detail, event.event, self.drag_state.is_some());
-        if self.drag_state.is_some() {
+        if let Some(drag) = self.drag_state.take() {
             tracing::debug!("Ending drag operation");
-            self.drag_state = None;
             self.conn.ungrab_pointer()?;
             self.conn.flush()?;
+
+            // Restore edge cursor if pointer is still over the dragged floating window
+            let window = match drag {
+                DragState::Move { window, .. } | DragState::Resize { window, .. } => window,
+            };
+            if self.is_floating(window) {
+                // Use the release event position to update cursor
+                self.update_edge_cursor(window, event.root_x, event.root_y)?;
+            }
         }
         Ok(())
     }
@@ -565,11 +594,13 @@ impl WindowManager {
             let is_managed = self.windows.contains_key(&window);
             let is_float = is_managed && self.is_floating(window);
 
+            // Debug: log all motion events to track down cursor flicker
+            tracing::debug!(
+                "MotionNotify: window={} managed={} floating={} root_xy=({},{}) event_xy=({},{})",
+                window, is_managed, is_float, event.root_x, event.root_y, event.event_x, event.event_y
+            );
+
             if is_float {
-                tracing::trace!(
-                    "Motion on floating window {}: root({},{}) event({},{})",
-                    window, event.root_x, event.root_y, event.event_x, event.event_y
-                );
                 self.update_edge_cursor(window, event.root_x, event.root_y)?;
             }
             return Ok(());
@@ -620,9 +651,11 @@ impl WindowManager {
     /// Handle pointer motion for edge cursor changes on floating windows.
     fn update_edge_cursor(&mut self, window: u32, root_x: i16, root_y: i16) -> Result<()> {
         if !self.is_floating(window) {
-            // Not a floating window, ensure cursor is normal
-            if self.current_edge_cursor.is_some() {
-                self.conn.set_window_cursor(window, self.conn.cursor_normal)?;
+            // Not a floating window, clear any edge cursor state
+            if let Some((old_window, old_edge)) = self.current_edge_cursor {
+                if old_edge != ResizeEdge::None {
+                    self.conn.clear_window_cursor(old_window)?;
+                }
                 self.current_edge_cursor = None;
             }
             return Ok(());
@@ -637,28 +670,29 @@ impl WindowManager {
             return Ok(()); // No change needed
         }
 
-        // Get the appropriate cursor for this edge
-        let cursor = match edge {
-            ResizeEdge::TopLeft => self.conn.cursor_top_left,
-            ResizeEdge::Top => self.conn.cursor_top,
-            ResizeEdge::TopRight => self.conn.cursor_top_right,
-            ResizeEdge::Left => self.conn.cursor_left,
-            ResizeEdge::Right => self.conn.cursor_right,
-            ResizeEdge::BottomLeft => self.conn.cursor_bottom_left,
-            ResizeEdge::Bottom => self.conn.cursor_bottom,
-            ResizeEdge::BottomRight => self.conn.cursor_bottom_right,
-            ResizeEdge::None => self.conn.cursor_normal,
-        };
-
-        // Set cursor on the window
-        self.conn.set_window_cursor(window, cursor)?;
-        self.conn.flush()?;
-
         if edge != ResizeEdge::None {
-            tracing::debug!("Set resize cursor {:?} for floating window {} edge", edge, window);
+            let cursor = match edge {
+                ResizeEdge::TopLeft => self.conn.cursor_top_left,
+                ResizeEdge::Top => self.conn.cursor_top,
+                ResizeEdge::TopRight => self.conn.cursor_top_right,
+                ResizeEdge::Left => self.conn.cursor_left,
+                ResizeEdge::Right => self.conn.cursor_right,
+                ResizeEdge::BottomLeft => self.conn.cursor_bottom_left,
+                ResizeEdge::Bottom => self.conn.cursor_bottom,
+                ResizeEdge::BottomRight => self.conn.cursor_bottom_right,
+                ResizeEdge::None => unreachable!(),
+            };
+            self.conn.set_window_cursor(window, cursor)?;
+            self.conn.flush()?;
             self.current_edge_cursor = Some((window, edge));
+        } else if let Some((old_window, old_edge)) = current {
+            if old_edge != ResizeEdge::None {
+                self.conn.clear_window_cursor(old_window)?;
+                self.conn.flush()?;
+            }
+            self.current_edge_cursor = Some((window, ResizeEdge::None));
         } else {
-            self.current_edge_cursor = None;
+            self.current_edge_cursor = Some((window, ResizeEdge::None));
         }
 
         Ok(())
@@ -1696,6 +1730,21 @@ impl WindowManager {
             .unwrap_or(false)
     }
 
+    /// Get the appropriate cursor for a resize edge.
+    fn cursor_for_edge(&self, edge: ResizeEdge) -> u32 {
+        match edge {
+            ResizeEdge::TopLeft => self.conn.cursor_top_left,
+            ResizeEdge::Top => self.conn.cursor_top,
+            ResizeEdge::TopRight => self.conn.cursor_top_right,
+            ResizeEdge::Left => self.conn.cursor_left,
+            ResizeEdge::Right => self.conn.cursor_right,
+            ResizeEdge::BottomLeft => self.conn.cursor_bottom_left,
+            ResizeEdge::Bottom => self.conn.cursor_bottom,
+            ResizeEdge::BottomRight => self.conn.cursor_bottom_right,
+            ResizeEdge::None => self.conn.cursor_normal,
+        }
+    }
+
     fn get_floating_geometry(&self, window: u32) -> Rect {
         self.windows
             .get(&window)
@@ -1953,7 +2002,7 @@ impl WindowManager {
                 win.floating = false;
             }
 
-            // Remove POINTER_MOTION event mask (no longer need edge detection)
+            // Standard event mask for tiled window
             self.conn.select_input(
                 window,
                 EventMask::ENTER_WINDOW
@@ -1964,7 +2013,7 @@ impl WindowManager {
 
             // Clear edge cursor state if this window had one
             if self.current_edge_cursor.map(|(w, _)| w) == Some(window) {
-                self.conn.set_window_cursor(window, self.conn.cursor_normal)?;
+                self.conn.clear_window_cursor(window)?;
                 self.current_edge_cursor = None;
             }
 
@@ -2010,7 +2059,7 @@ impl WindowManager {
                 win.floating_geometry = geometry;
             }
 
-            // Add POINTER_MOTION event mask for edge detection
+            // Event mask for floating window (includes POINTER_MOTION for edge cursor)
             self.conn.select_input(
                 window,
                 EventMask::ENTER_WINDOW

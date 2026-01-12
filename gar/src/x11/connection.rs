@@ -83,8 +83,9 @@ pub struct Connection {
     // Struts (reserved screen areas for docks/panels)
     pub net_wm_strut: Atom,
     pub net_wm_strut_partial: Atom,
-    // Cursors for resize operations
+    // Cursors for resize/move operations
     pub cursor_normal: u32,
+    pub cursor_move: u32,
     pub cursor_top_left: u32,
     pub cursor_top_right: u32,
     pub cursor_bottom_left: u32,
@@ -155,6 +156,7 @@ impl Connection {
         // Create cursors for pointer and resize operations
         let (
             cursor_normal,
+            cursor_move,
             cursor_top_left,
             cursor_top_right,
             cursor_bottom_left,
@@ -209,6 +211,7 @@ impl Connection {
             net_wm_strut,
             net_wm_strut_partial,
             cursor_normal,
+            cursor_move,
             cursor_top_left,
             cursor_top_right,
             cursor_bottom_left,
@@ -283,13 +286,13 @@ impl Connection {
     }
 
     /// Create all cursors used by the window manager.
-    fn create_cursors(conn: &RustConnection) -> Result<(u32, u32, u32, u32, u32, u32, u32, u32, u32), Error> {
+    fn create_cursors(conn: &RustConnection) -> Result<(u32, u32, u32, u32, u32, u32, u32, u32, u32, u32), Error> {
         // Open the cursor font
         let font: Font = conn.generate_id()?;
         conn.open_font(font, b"cursor")?;
 
         // Cursor glyph numbers from the cursor font:
-        // left_ptr = 68, top_left_corner = 134, top_right_corner = 136
+        // left_ptr = 68, fleur = 52, top_left_corner = 134, top_right_corner = 136
         // bottom_left_corner = 12, bottom_right_corner = 14
         // left_side = 70, right_side = 96, top_side = 138, bottom_side = 16
 
@@ -308,6 +311,7 @@ impl Connection {
         };
 
         let cursor_normal = create(68)?;       // left_ptr
+        let cursor_move = create(52)?;         // fleur (move cursor)
         let cursor_top_left = create(134)?;    // top_left_corner
         let cursor_top_right = create(136)?;   // top_right_corner
         let cursor_bottom_left = create(12)?;  // bottom_left_corner
@@ -322,6 +326,7 @@ impl Connection {
 
         Ok((
             cursor_normal,
+            cursor_move,
             cursor_top_left,
             cursor_top_right,
             cursor_bottom_left,
@@ -437,7 +442,16 @@ impl Connection {
 
     /// Set the cursor for a window.
     pub fn set_window_cursor(&self, window: Window, cursor: u32) -> Result<(), Error> {
+        tracing::debug!("set_window_cursor: window={} cursor={}", window, cursor);
         let change = ChangeWindowAttributesAux::new().cursor(cursor);
+        self.conn.change_window_attributes(window, &change)?;
+        Ok(())
+    }
+
+    /// Clear the cursor attribute from a window, letting the application's cursor show.
+    pub fn clear_window_cursor(&self, window: Window) -> Result<(), Error> {
+        tracing::debug!("clear_window_cursor: window={}", window);
+        let change = ChangeWindowAttributesAux::new().cursor(x11rb::NONE);
         self.conn.change_window_attributes(window, &change)?;
         Ok(())
     }
@@ -528,8 +542,9 @@ impl Connection {
         Ok(())
     }
 
-    /// Grab the pointer for drag operations.
-    pub fn grab_pointer(&self, _window: Window) -> Result<(), Error> {
+    /// Grab the pointer for drag operations with optional cursor override.
+    pub fn grab_pointer(&self, cursor: Option<u32>) -> Result<(), Error> {
+        let cursor_id = cursor.unwrap_or(x11rb::NONE);
         let reply = self.conn.grab_pointer(
             false,
             self.root,
@@ -537,7 +552,7 @@ impl Connection {
             GrabMode::ASYNC,
             GrabMode::ASYNC,
             x11rb::NONE,
-            x11rb::NONE,
+            cursor_id,
             CURRENT_TIME,
         )?.reply()?;
         tracing::debug!("grab_pointer result: {:?}", reply.status);

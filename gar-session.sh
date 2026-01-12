@@ -8,8 +8,9 @@
 #   --output HDMI-1 --mode 2560x1440 --pos 1920x0
 
 # Launch compositor before WM (for proper screen repainting)
+# --backend glx is required for picom v12+ (no longer has a default)
 if command -v picom &> /dev/null; then
-    picom -b --use-ewmh-active-win &
+    picom -b --backend glx --use-ewmh-active-win &
     sleep 0.1
 fi
 
