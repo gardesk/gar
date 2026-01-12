@@ -224,6 +224,19 @@ impl Connection {
                 self.screen_width,
                 self.screen_height,
             )?;
+
+            // Force cursor refresh by warping pointer in place
+            // This clears any stale cursor artifacts from display manager
+            if let Ok(reply) = self.conn.query_pointer(self.root)?.reply() {
+                self.conn.warp_pointer(
+                    x11rb::NONE,
+                    self.root,
+                    0, 0, 0, 0,
+                    reply.root_x,
+                    reply.root_y,
+                )?;
+            }
+
             self.conn.flush()?;
         }
 
