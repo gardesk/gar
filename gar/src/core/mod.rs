@@ -39,6 +39,8 @@ pub struct WindowManager {
     pub last_warp: std::time::Instant,
     /// Frame manager for title bars
     pub frames: FrameManager,
+    /// Focus history stack - most recently focused windows first (per workspace)
+    pub focus_history: Vec<XWindow>,
 }
 
 impl WindowManager {
@@ -126,6 +128,7 @@ impl WindowManager {
             i3_ipc_server,
             last_warp: std::time::Instant::now(),
             frames: FrameManager::new(),
+            focus_history: Vec::new(),
         })
     }
 
@@ -409,10 +412,19 @@ impl WindowManager {
                 self.workspaces[ws_idx].tree.remove(window);
             }
 
+            // Remove from focus history
+            self.focus_history.retain(|&w| w != window);
+
             // Update focus if this was the focused window
             if self.focused_window == Some(window) {
-                // Try to focus another window on that workspace
-                self.focused_window = self.workspaces[ws_idx].tree.first_window()
+                // Find next window from focus history that's on this workspace
+                let next_from_history = self.focus_history.iter()
+                    .find(|&&w| self.windows.get(&w).map(|win| win.workspace == ws_idx).unwrap_or(false))
+                    .copied();
+
+                // Fall back to first window in tree or floating list if no history
+                self.focused_window = next_from_history
+                    .or_else(|| self.workspaces[ws_idx].tree.first_window())
                     .or_else(|| self.workspaces[ws_idx].floating.last().copied());
                 self.workspaces[ws_idx].focused = self.focused_window;
             }
@@ -466,9 +478,15 @@ impl WindowManager {
     }
 
     /// Set focus to a window.
-    pub fn set_focus(&mut self, window: XWindow) -> Result<()> {
+    /// If `warp_pointer` is true, the mouse pointer will be moved to the window center.
+    /// Use true for keyboard navigation, false for mouse-initiated focus changes.
+    pub fn set_focus(&mut self, window: XWindow, warp_pointer: bool) -> Result<()> {
         self.focused_window = Some(window);
         self.current_workspace_mut().focused = Some(window);
+
+        // Update focus history - move window to front
+        self.focus_history.retain(|&w| w != window);
+        self.focus_history.insert(0, window);
 
         // Clear urgency when window receives focus
         if let Some(win) = self.windows.get_mut(&window) {
@@ -483,11 +501,13 @@ impl WindowManager {
         self.update_borders()?;
 
         // Warp pointer to center of focused window (mouse follows focus)
-        if let Err(e) = self.conn.warp_pointer_to_window(window) {
-            tracing::warn!("Failed to warp pointer: {}", e);
+        if warp_pointer {
+            if let Err(e) = self.conn.warp_pointer_to_window(window) {
+                tracing::warn!("Failed to warp pointer: {}", e);
+            }
+            // Record warp time to suppress EnterNotify feedback loop
+            self.last_warp = std::time::Instant::now();
         }
-        // Record warp time to suppress EnterNotify feedback loop
-        self.last_warp = std::time::Instant::now();
 
         Ok(())
     }
