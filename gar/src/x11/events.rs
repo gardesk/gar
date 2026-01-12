@@ -209,6 +209,18 @@ impl WindowManager {
         if self.conn.should_ignore(window) {
             tracing::info!("Window {} is dock/desktop, mapping without managing", window);
             self.conn.map_window(window)?;
+
+            // Read struts from dock windows (reserved screen areas)
+            if let Some(strut) = self.conn.get_strut(window) {
+                tracing::info!(
+                    "Dock window {} has strut: left={}, right={}, top={}, bottom={}",
+                    window, strut.left, strut.right, strut.top, strut.bottom
+                );
+                self.dock_struts.insert(window, strut);
+                // Re-apply layout to respect new strut
+                self.apply_layout()?;
+            }
+
             self.conn.flush()?;
             return Ok(());
         }
@@ -300,6 +312,14 @@ impl WindowManager {
         let window = event.window;
         tracing::debug!("UnmapNotify for window {}", window);
 
+        // Check if this was a dock window with struts
+        if self.dock_struts.remove(&window).is_some() {
+            tracing::info!("Dock window {} unmapped, removing strut", window);
+            self.apply_layout()?;
+            self.conn.flush()?;
+            return Ok(());
+        }
+
         // Check if this window is on a visible workspace (any monitor's active workspace)
         let is_visible = self.windows.get(&window)
             .map(|w| self.is_workspace_visible(w.workspace))
@@ -331,6 +351,11 @@ impl WindowManager {
 
     fn handle_destroy_notify(&mut self, event: DestroyNotifyEvent) -> Result<()> {
         tracing::debug!("DestroyNotify for window {}", event.window);
+
+        // Check if this was a dock window with struts
+        if self.dock_struts.remove(&event.window).is_some() {
+            tracing::info!("Dock window {} destroyed, removing strut", event.window);
+        }
 
         // Remove from management
         self.unmanage_window(event.window);

@@ -14,7 +14,7 @@ use x11rb::protocol::xproto::{ConnectionExt, Window as XWindow};
 
 use crate::config::{Config, LuaConfig, LuaState, RuleActions, WindowMatch};
 use crate::ipc::{IpcServer, I3IpcServer};
-use crate::x11::Connection;
+use crate::x11::{Connection, Strut};
 use crate::x11::events::DragState;
 use crate::x11::FrameManager;
 use crate::Result;
@@ -41,6 +41,8 @@ pub struct WindowManager {
     pub frames: FrameManager,
     /// Focus history stack - most recently focused windows first (per workspace)
     pub focus_history: Vec<XWindow>,
+    /// Struts from dock windows (status bars) - maps window ID to strut
+    pub dock_struts: HashMap<XWindow, Strut>,
 }
 
 impl WindowManager {
@@ -129,6 +131,7 @@ impl WindowManager {
             last_warp: std::time::Instant::now(),
             frames: FrameManager::new(),
             focus_history: Vec::new(),
+            dock_struts: HashMap::new(),
         })
     }
 
@@ -642,6 +645,18 @@ impl WindowManager {
         let gap_inner = self.config.gap_inner as i16;
         let half_gap = gap_inner / 2;
 
+        // Calculate combined struts from all dock windows
+        let mut strut_left: u32 = 0;
+        let mut strut_right: u32 = 0;
+        let mut strut_top: u32 = 0;
+        let mut strut_bottom: u32 = 0;
+        for strut in self.dock_struts.values() {
+            strut_left = strut_left.max(strut.left);
+            strut_right = strut_right.max(strut.right);
+            strut_top = strut_top.max(strut.top);
+            strut_bottom = strut_bottom.max(strut.bottom);
+        }
+
         // Collect visible workspaces (one per monitor)
         let visible_workspaces: Vec<(usize, Rect)> = self.monitors
             .iter()
@@ -681,11 +696,17 @@ impl WindowManager {
                 continue;
             }
 
+            // Calculate work area accounting for struts (dock/panel reserved areas)
+            let strut_left_i16 = strut_left as i16;
+            let strut_top_i16 = strut_top as i16;
+            let strut_h = (strut_left + strut_right) as u16;
+            let strut_v = (strut_top + strut_bottom) as u16;
+
             let work_area = Rect::new(
-                screen.x + gap_outer,
-                screen.y + gap_outer,
-                screen.width.saturating_sub(2 * gap_outer as u16),
-                screen.height.saturating_sub(2 * gap_outer as u16),
+                screen.x + gap_outer + strut_left_i16,
+                screen.y + gap_outer + strut_top_i16,
+                screen.width.saturating_sub(2 * gap_outer as u16 + strut_h),
+                screen.height.saturating_sub(2 * gap_outer as u16 + strut_v),
             );
 
             let ws = &self.workspaces[*ws_idx];
