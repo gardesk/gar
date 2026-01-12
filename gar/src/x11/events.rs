@@ -958,7 +958,24 @@ impl WindowManager {
             // Re-apply layout
             self.apply_layout()?;
 
+            // Keep focus on the original window (now in swapped position)
+            self.set_focus(focused, true)?;
+
             tracing::debug!("Swapped with window {} in direction {:?}", target, direction);
+        } else if self.monitors.len() > 1 {
+            // No adjacent window - try moving to adjacent monitor
+            let target_monitor = match direction {
+                Direction::Left => Some("prev"),
+                Direction::Right => Some("next"),
+                // For up/down with horizontal monitor arrangement, could also try prev/next
+                // but typically vertical movement doesn't cross monitors
+                Direction::Up | Direction::Down => None,
+            };
+
+            if let Some(target) = target_monitor {
+                tracing::debug!("No adjacent window, moving to {} monitor", target);
+                self.move_to_monitor(target)?;
+            }
         }
 
         Ok(())
@@ -1164,6 +1181,9 @@ impl WindowManager {
                 .tree
                 .insert_with_rect(window, target_focused, screen);
         }
+
+        // Set target workspace focus to the moved window so switch_workspace will focus it
+        self.workspaces[idx].focused = Some(window);
 
         // If target workspace is visible, map the window; otherwise hide it
         if target_visible_on.is_some() {
@@ -1664,6 +1684,9 @@ impl WindowManager {
 
         // Apply layouts on both monitors
         self.apply_layout()?;
+
+        // Set X11 focus on the moved window (updates focused_window, button grabs, EWMH)
+        self.set_focus(window, true)?;
 
         self.conn.flush()?;
         Ok(())
