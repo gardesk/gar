@@ -282,6 +282,11 @@ impl LuaConfig {
                         state.config.follow_window_on_move = v;
                     }
                 }
+                "mouse_follows_focus" => {
+                    if let Value::Boolean(v) = value {
+                        state.config.mouse_follows_focus = v;
+                    }
+                }
                 _ => {
                     tracing::warn!("Unknown config key: {}", key);
                 }

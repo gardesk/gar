@@ -153,7 +153,7 @@ impl WindowManager {
             self.apply_layout()?;
             // Focus the first window
             if let Some(window) = self.focused_window {
-                self.set_focus(window)?;
+                self.set_focus(window, true)?;
                 self.conn.ungrab_button(window)?;
             }
             tracing::info!("Adopted {} existing windows", adopted);
@@ -276,7 +276,7 @@ impl WindowManager {
 
         // Focus the new window (only if on current workspace)
         if target_idx == self.focused_workspace {
-            self.set_focus(window)?;
+            self.set_focus(window, true)?;
         }
 
         Ok(())
@@ -317,7 +317,7 @@ impl WindowManager {
 
             // Focus next window or warp to monitor if none left
             if let Some(win) = self.focused_window {
-                self.set_focus(win)?;
+                self.set_focus(win, true)?;
             } else {
                 // No windows left, warp to current monitor center
                 self.warp_to_monitor(self.focused_monitor)?;
@@ -344,7 +344,7 @@ impl WindowManager {
 
         // Focus next window or warp to monitor if none left
         if let Some(window) = self.focused_window {
-            self.set_focus(window)?;
+            self.set_focus(window, true)?;
         } else {
             // No windows left, warp to current monitor center
             self.warp_to_monitor(self.focused_monitor)?;
@@ -412,8 +412,8 @@ impl WindowManager {
                 self.conn.grab_button(old)?;
             }
 
-            // Set focus and ungrab button on new focused window
-            self.set_focus(window)?;
+            // Set focus and ungrab button on new focused window (no warp - mouse click)
+            self.set_focus(window, false)?;
             self.conn.ungrab_button(window)?;
 
             // Raise floating windows on focus
@@ -524,8 +524,8 @@ impl WindowManager {
             self.conn.grab_button(old)?;
         }
 
-        // Focus the new window (this will warp pointer back, but we'll suppress the resulting EnterNotify)
-        self.set_focus(window)?;
+        // Focus the new window (no warp - mouse enter)
+        self.set_focus(window, false)?;
         self.conn.ungrab_button(window)?;
 
         // Raise floating windows on focus
@@ -554,11 +554,11 @@ impl WindowManager {
                         self.switch_workspace(ws_idx)?;
                     }
                 }
-                // Focus the window
+                // Focus the window (external activation, warp pointer)
                 if let Some(old) = self.focused_window {
                     self.conn.grab_button(old)?;
                 }
-                self.set_focus(window)?;
+                self.set_focus(window, true)?;
                 self.conn.ungrab_button(window)?;
                 if self.is_floating(window) {
                     self.raise_window(window)?;
@@ -854,8 +854,8 @@ impl WindowManager {
             // Regrab button on old window
             self.conn.grab_button(focused)?;
 
-            // Focus new window
-            self.set_focus(target)?;
+            // Focus new window (keyboard navigation, warp pointer)
+            self.set_focus(target, true)?;
             self.conn.ungrab_button(target)?;
             self.conn.flush()?;
 
@@ -909,7 +909,7 @@ impl WindowManager {
             if let Some(old) = self.focused_window {
                 self.conn.grab_button(old)?;
             }
-            self.set_focus(window)?;
+            self.set_focus(window, true)?;
             self.conn.ungrab_button(window)?;
         } else {
             // No windows on target monitor - clear focus and warp to monitor center
@@ -1014,7 +1014,7 @@ impl WindowManager {
                 .or_else(|| self.workspaces[idx].floating.last().copied())
                 .or_else(|| self.workspaces[idx].tree.first_window())
             {
-                self.set_focus(window)?;
+                self.set_focus(window, true)?;
             } else {
                 self.focused_window = None;
                 self.conn.set_active_window(None)?;
@@ -1061,7 +1061,7 @@ impl WindowManager {
                 .or_else(|| self.workspaces[idx].floating.last().copied())
                 .or_else(|| self.workspaces[idx].tree.first_window())
             {
-                self.set_focus(window)?;
+                self.set_focus(window, true)?;
             } else {
                 // No windows - warp to center of monitor
                 self.focused_window = None;
@@ -1171,7 +1171,7 @@ impl WindowManager {
             if current_ws == self.focused_workspace {
                 self.focused_window = new_focus_on_current;
                 if let Some(new_focus) = self.focused_window {
-                    self.set_focus(new_focus)?;
+                    self.set_focus(new_focus, true)?;
                 } else {
                     self.conn.set_active_window(None)?;
                 }
@@ -1559,7 +1559,7 @@ impl WindowManager {
             if let Some(old) = self.focused_window {
                 self.conn.grab_button(old)?;
             }
-            self.set_focus(window)?;
+            self.set_focus(window, true)?;
             self.conn.ungrab_button(window)?;
         } else {
             // No windows - warp to monitor center
@@ -1673,8 +1673,8 @@ impl WindowManager {
             self.conn.grab_button(old)?;
         }
 
-        // Focus and raise the next floating window
-        self.set_focus(next_window)?;
+        // Focus and raise the next floating window (keyboard action, warp pointer)
+        self.set_focus(next_window, true)?;
         self.conn.ungrab_button(next_window)?;
         self.raise_window(next_window)?;
 

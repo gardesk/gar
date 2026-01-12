@@ -18,6 +18,7 @@ pub struct Config {
     pub titlebar_text_color: u32,
     // Behavior settings
     pub follow_window_on_move: bool,
+    pub mouse_follows_focus: bool,
 }
 
 impl Default for Config {
@@ -37,6 +38,8 @@ impl Default for Config {
             titlebar_text_color: 0xffffff,
             // Behavior: follow window when moving to another workspace
             follow_window_on_move: false,
+            // Behavior: warp mouse pointer to center of focused window
+            mouse_follows_focus: false,
         }
     }
 }
