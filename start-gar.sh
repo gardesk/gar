@@ -84,11 +84,18 @@ xrandr \\
   --output HDMI-1 --mode 2560x1440 --pos 1920x0 \\
   --output HDMI-0 --mode 3840x2160 --pos 4480x0
 
+# Ensure gar config directory exists
+mkdir -p ~/.config/gar
+
 # Launch compositor before WM (for proper screen repainting)
-# --use-ewmh-active-win uses _NET_ACTIVE_WINDOW for focus detection
-# --backend glx is required for picom v12+ (no longer has a default)
+# gar generates picom.conf on startup and signals picom to reload
 if command -v picom > /dev/null 2>&1; then
-    picom -b --backend glx --use-ewmh-active-win &
+    if [[ -f ~/.config/gar/picom.conf ]]; then
+        picom -b --config ~/.config/gar/picom.conf &
+    else
+        # First run: start with GLX backend, gar will generate config and signal reload
+        picom -b --backend glx &
+    fi
     sleep 0.1
 fi
 

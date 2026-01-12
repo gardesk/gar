@@ -1470,6 +1470,11 @@ impl WindowManager {
             self.config = state.config.clone();
         }
 
+        // Regenerate picom config and signal picom to reload
+        if let Err(e) = self.config.write_picom_config() {
+            tracing::warn!("Failed to regenerate picom config: {}", e);
+        }
+
         // Re-register keybinds
         self.setup_grabs()?;
 

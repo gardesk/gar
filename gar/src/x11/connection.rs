@@ -1160,6 +1160,21 @@ impl Connection {
         Ok(())
     }
 
+    /// Set _NET_WM_BYPASS_COMPOSITOR on a window.
+    /// Value: 0 = no preference, 1 = bypass compositor, 2 = don't bypass
+    /// Setting to 1 tells picom to not apply blur/shadows/rounded corners to this window.
+    pub fn set_bypass_compositor(&self, window: Window, bypass: bool) -> Result<(), Error> {
+        let value: u32 = if bypass { 1 } else { 0 };
+        self.conn.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.net_wm_bypass_compositor,
+            AtomEnum::CARDINAL,
+            &[value],
+        )?;
+        Ok(())
+    }
+
     /// Detect connected monitors via RandR.
     pub fn detect_monitors(&self) -> Result<Vec<crate::core::Monitor>, Error> {
         use x11rb::protocol::randr::{self, ConnectionExt as RandrExt};

@@ -294,6 +294,74 @@ impl LuaConfig {
                         state.config.bar_height = v as u32;
                     }
                 }
+                // Compositor visual settings (picom)
+                "corner_radius" => {
+                    if let Value::Integer(v) = value {
+                        state.config.corner_radius = v as u32;
+                    }
+                }
+                "blur_enabled" => {
+                    if let Value::Boolean(v) = value {
+                        state.config.blur_enabled = v;
+                    }
+                }
+                "blur_method" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            state.config.blur_method = str_val.to_string();
+                        }
+                    }
+                }
+                "blur_strength" => {
+                    if let Value::Integer(v) = value {
+                        state.config.blur_strength = v as u32;
+                    }
+                }
+                "shadow_enabled" => {
+                    if let Value::Boolean(v) = value {
+                        state.config.shadow_enabled = v;
+                    }
+                }
+                "shadow_radius" => {
+                    if let Value::Integer(v) = value {
+                        state.config.shadow_radius = v as u32;
+                    }
+                }
+                "shadow_opacity" => {
+                    if let Value::Number(v) = value {
+                        state.config.shadow_opacity = v;
+                    }
+                }
+                "shadow_offset_x" => {
+                    if let Value::Integer(v) = value {
+                        state.config.shadow_offset_x = v as i32;
+                    }
+                }
+                "shadow_offset_y" => {
+                    if let Value::Integer(v) = value {
+                        state.config.shadow_offset_y = v as i32;
+                    }
+                }
+                "opacity_focused" => {
+                    if let Value::Number(v) = value {
+                        state.config.opacity_focused = v;
+                    }
+                }
+                "opacity_unfocused" => {
+                    if let Value::Number(v) = value {
+                        state.config.opacity_unfocused = v;
+                    }
+                }
+                "fade_enabled" => {
+                    if let Value::Boolean(v) = value {
+                        state.config.fade_enabled = v;
+                    }
+                }
+                "fade_delta" => {
+                    if let Value::Integer(v) = value {
+                        state.config.fade_delta = v as u32;
+                    }
+                }
                 _ => {
                     tracing::warn!("Unknown config key: {}", key);
                 }

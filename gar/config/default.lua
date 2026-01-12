@@ -18,6 +18,23 @@ gar.set("border_color_unfocused", "#2d2d2d")
 gar.set("gap_inner", 8)
 gar.set("gap_outer", 8)
 
+-- Visual Effects (picom compositor)
+-- gar auto-generates ~/.config/gar/picom.conf from these settings
+-- Changes take effect on reload (Mod+Shift+R) - picom is signaled automatically
+-- gar.set("corner_radius", 12)              -- 0 = square corners
+-- gar.set("blur_enabled", true)
+-- gar.set("blur_method", "dual_kawase")     -- "gaussian", "dual_kawase", "box"
+-- gar.set("blur_strength", 5)               -- 1-20 for dual_kawase
+-- gar.set("shadow_enabled", true)
+-- gar.set("shadow_radius", 12)
+-- gar.set("shadow_opacity", 0.75)
+-- gar.set("shadow_offset_x", -7)
+-- gar.set("shadow_offset_y", -7)
+-- gar.set("opacity_focused", 1.0)
+-- gar.set("opacity_unfocused", 0.9)         -- Dim unfocused windows
+-- gar.set("fade_enabled", true)
+-- gar.set("fade_delta", 10)
+
 -- Behavior
 gar.set("follow_window_on_move", true)  -- Follow window when using Mod+Shift+number
 

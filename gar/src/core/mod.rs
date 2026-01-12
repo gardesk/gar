@@ -65,6 +65,11 @@ impl WindowManager {
         // Get config values from Lua state
         let config = lua_state.lock().unwrap().config.clone();
 
+        // Generate picom config from settings
+        if let Err(e) = config.write_picom_config() {
+            tracing::warn!("Failed to generate picom config: {}", e);
+        }
+
         // Initialize IPC server (optional - graceful failure)
         let ipc_server = match IpcServer::new() {
             Ok(server) => Some(server),
@@ -568,6 +573,9 @@ impl WindowManager {
 
             // Clear EWMH fullscreen state
             let _ = self.conn.set_window_state(window, &[]);
+
+            // Tell compositor to re-apply effects (blur, shadows, etc.)
+            let _ = self.conn.set_bypass_compositor(window, false);
         } else {
             // Enter fullscreen
             tracing::info!("Window {} entering fullscreen", window);
@@ -578,6 +586,9 @@ impl WindowManager {
 
             // Set EWMH fullscreen state
             let _ = self.conn.set_window_state(window, &[self.conn.net_wm_state_fullscreen]);
+
+            // Tell compositor to bypass effects (better performance for games/video)
+            let _ = self.conn.set_bypass_compositor(window, true);
         }
 
         // Re-apply layout (fullscreen windows get special treatment in apply_layout)
