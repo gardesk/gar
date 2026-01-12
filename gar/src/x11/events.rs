@@ -1932,13 +1932,21 @@ impl WindowManager {
     }
 
     /// Build i3-compatible workspace list
+    /// Only includes workspaces that are visible or have windows (like i3)
     fn build_i3_workspaces(&self) -> Vec<crate::ipc::I3WorkspaceInfo> {
         use crate::ipc::{I3WorkspaceInfo, I3Rect};
 
-        self.workspaces.iter().enumerate().map(|(i, ws)| {
+        self.workspaces.iter().enumerate().filter_map(|(i, ws)| {
             // Find which monitor this workspace is on (if visible)
             let monitor = self.monitors.iter().find(|m| m.active_workspace == i);
             let visible = monitor.is_some();
+            let has_windows = ws.has_windows();
+
+            // Only include workspaces that are visible OR have windows
+            if !visible && !has_windows {
+                return None;
+            }
+
             let focused = self.focused_monitor < self.monitors.len()
                 && self.monitors[self.focused_monitor].active_workspace == i;
 
@@ -1947,7 +1955,8 @@ impl WindowManager {
                 .filter(|w| w.workspace == i)
                 .any(|w| w.urgent);
 
-            // Get geometry from monitor if visible, else use first monitor's geometry
+            // Get geometry and output from monitor
+            // For non-visible workspaces with windows, assign to focused monitor
             let (rect, output) = if let Some(mon) = monitor {
                 (
                     I3Rect {
@@ -1959,20 +1968,20 @@ impl WindowManager {
                     mon.name.clone(),
                 )
             } else {
-                // Not visible - use first monitor as fallback
-                let fallback = &self.monitors[0];
+                // Not visible but has windows - assign to focused monitor
+                let mon = &self.monitors[self.focused_monitor];
                 (
                     I3Rect {
-                        x: fallback.geometry.x as i32,
-                        y: fallback.geometry.y as i32,
-                        width: fallback.geometry.width as i32,
-                        height: fallback.geometry.height as i32,
+                        x: mon.geometry.x as i32,
+                        y: mon.geometry.y as i32,
+                        width: mon.geometry.width as i32,
+                        height: mon.geometry.height as i32,
                     },
-                    fallback.name.clone(),
+                    mon.name.clone(),
                 )
             };
 
-            I3WorkspaceInfo {
+            Some(I3WorkspaceInfo {
                 id: (i + 1) as i64 * 1000000, // Generate unique ID
                 num: (i + 1) as i32,
                 name: ws.name.clone(),
@@ -1981,7 +1990,7 @@ impl WindowManager {
                 urgent,
                 rect,
                 output,
-            }
+            })
         }).collect()
     }
 
