@@ -310,7 +310,15 @@ impl WindowManager {
 
     fn handle_unmap_notify(&mut self, event: UnmapNotifyEvent) -> Result<()> {
         let window = event.window;
-        tracing::debug!("UnmapNotify for window {}", window);
+        tracing::debug!("UnmapNotify for window {} (event on {})", window, event.event);
+
+        // Only handle SubstructureNotify events (event.event == root)
+        // Ignore StructureNotify events sent directly to the window (event.event == window)
+        // This prevents double-processing since we get both types of events
+        if event.event != self.conn.root {
+            tracing::debug!("Ignoring UnmapNotify (not from root, likely StructureNotify)");
+            return Ok(());
+        }
 
         // Check if this was a dock window with struts
         if self.dock_struts.remove(&window).is_some() {
