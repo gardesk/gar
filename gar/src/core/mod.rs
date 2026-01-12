@@ -10,7 +10,7 @@ pub use workspace::Workspace;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use x11rb::protocol::xproto::Window as XWindow;
+use x11rb::protocol::xproto::{ConnectionExt, Window as XWindow};
 
 use crate::config::{Config, LuaConfig, LuaState, RuleActions, WindowMatch};
 use crate::ipc::IpcServer;
@@ -32,6 +32,8 @@ pub struct WindowManager {
     pub running: bool,
     pub drag_state: Option<DragState>,
     pub ipc_server: Option<IpcServer>,
+    /// Timestamp of last pointer warp - used to suppress EnterNotify feedback loop
+    pub last_warp: std::time::Instant,
 }
 
 impl WindowManager {
@@ -111,6 +113,7 @@ impl WindowManager {
             running: true,
             drag_state: None,
             ipc_server,
+            last_warp: std::time::Instant::now(),
         })
     }
 
@@ -371,29 +374,61 @@ impl WindowManager {
         self.conn.set_focus(window)?;
         self.conn.set_active_window(Some(window))?;
         self.update_borders()?;
+
+        // Warp pointer to center of focused window (mouse follows focus)
+        if let Err(e) = self.conn.warp_pointer_to_window(window) {
+            tracing::warn!("Failed to warp pointer: {}", e);
+        }
+        // Record warp time to suppress EnterNotify feedback loop
+        self.last_warp = std::time::Instant::now();
+
         Ok(())
     }
 
-    /// Update border colors for all windows based on focus state.
+    /// Warp pointer to center of a monitor (for focus without windows)
+    pub fn warp_to_monitor(&mut self, monitor_idx: usize) -> Result<()> {
+        let geom = self.monitors[monitor_idx].geometry;
+        let center_x = geom.x + (geom.width / 2) as i16;
+        let center_y = geom.y + (geom.height / 2) as i16;
+
+        self.conn.conn.warp_pointer(
+            x11rb::NONE,
+            self.conn.root,
+            0, 0, 0, 0,
+            center_x,
+            center_y,
+        )?;
+        self.last_warp = std::time::Instant::now();
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Update border colors for all visible windows based on focus state.
     pub fn update_borders(&mut self) -> Result<()> {
         let focused = self.focused_window;
         let focused_color = self.config.border_color_focused;
         let unfocused_color = self.config.border_color_unfocused;
         let border_width = self.config.border_width;
 
-        // Update borders for all windows (tiled + floating)
-        for window in self.current_workspace().all_windows() {
-            let color = if Some(window) == focused {
-                focused_color
-            } else {
-                unfocused_color
-            };
-            self.conn.set_border(window, border_width, color)?;
+        // Get all visible workspace indices
+        let visible_ws: Vec<usize> = self.monitors.iter().map(|m| m.active_workspace).collect();
+
+        // Update borders for all windows on visible workspaces
+        for ws_idx in visible_ws {
+            for window in self.workspaces[ws_idx].all_windows() {
+                let color = if Some(window) == focused {
+                    focused_color
+                } else {
+                    unfocused_color
+                };
+                self.conn.set_border(window, border_width, color)?;
+            }
         }
         Ok(())
     }
 
-    /// Apply the current layout to all windows.
+    /// Apply the current layout to all visible windows across all monitors.
+    /// Each monitor displays its active_workspace.
     /// Stacking order: tiled windows at bottom, floating windows on top (in list order).
     pub fn apply_layout(&mut self) -> Result<()> {
         use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt, StackMode};
@@ -403,88 +438,103 @@ impl WindowManager {
         let gap_inner = self.config.gap_inner as i16;
         let half_gap = gap_inner / 2;
 
-        // Apply outer gap to screen rect
-        let screen = self.screen_rect();
-        let work_area = Rect::new(
-            screen.x + gap_outer,
-            screen.y + gap_outer,
-            screen.width.saturating_sub(2 * gap_outer as u16),
-            screen.height.saturating_sub(2 * gap_outer as u16),
-        );
+        // Collect visible workspaces (one per monitor)
+        let visible_workspaces: Vec<(usize, Rect)> = self.monitors
+            .iter()
+            .map(|m| (m.active_workspace, m.geometry))
+            .collect();
 
-        tracing::debug!(
-            "apply_layout: screen={:?}, work_area={:?}, tiled_count={}, floating_count={}",
-            screen,
-            work_area,
-            self.current_workspace().tree.window_count(),
-            self.current_workspace().floating.len()
-        );
-
-        // 1. Configure tiled windows from the BSP tree
-        let geometries = self.current_workspace().tree.calculate_geometries(work_area);
-        for (window, rect) in &geometries {
-            // Apply inner gap: shrink each window by half_gap on each side
-            let gapped_x = rect.x + half_gap;
-            let gapped_y = rect.y + half_gap;
-            let gapped_width = rect.width.saturating_sub(gap_inner as u16);
-            let gapped_height = rect.height.saturating_sub(gap_inner as u16);
-
-            // Account for border width
-            let final_width = gapped_width.saturating_sub(2 * border_width as u16);
-            let final_height = gapped_height.saturating_sub(2 * border_width as u16);
-
-            tracing::debug!(
-                "apply_layout: TILED window={} at ({}, {}) size {}x{}",
-                window, gapped_x, gapped_y, final_width.max(1), final_height.max(1)
+        // Layout each monitor's active workspace
+        for (ws_idx, screen) in &visible_workspaces {
+            let work_area = Rect::new(
+                screen.x + gap_outer,
+                screen.y + gap_outer,
+                screen.width.saturating_sub(2 * gap_outer as u16),
+                screen.height.saturating_sub(2 * gap_outer as u16),
             );
 
-            self.conn.configure_window(
-                *window,
-                gapped_x,
-                gapped_y,
-                final_width.max(1),
-                final_height.max(1),
-                border_width,
-            )?;
-        }
+            let ws = &self.workspaces[*ws_idx];
+            tracing::debug!(
+                "apply_layout: ws={} screen={:?}, work_area={:?}, tiled={}, floating={}",
+                ws_idx + 1, screen, work_area,
+                ws.tree.window_count(), ws.floating.len()
+            );
 
-        // 2. Configure floating windows and stack them above tiled
-        // Get floating window IDs (in stacking order: first = bottom, last = top)
-        let floating_ids: Vec<XWindow> = self.current_workspace().floating.clone();
+            // 1. Configure tiled windows from the BSP tree
+            let geometries = ws.tree.calculate_geometries(work_area);
+            for (window, rect) in &geometries {
+                // Apply inner gap: shrink each window by half_gap on each side
+                let gapped_x = rect.x + half_gap;
+                let gapped_y = rect.y + half_gap;
+                let gapped_width = rect.width.saturating_sub(gap_inner as u16);
+                let gapped_height = rect.height.saturating_sub(gap_inner as u16);
 
-        for window_id in floating_ids {
-            // Get the window's floating geometry from our state
-            if let Some(win) = self.windows.get(&window_id) {
-                let geom = win.floating_geometry;
-                let adjusted_width = geom.width.saturating_sub(2 * border_width as u16);
-                let adjusted_height = geom.height.saturating_sub(2 * border_width as u16);
+                // Account for border width
+                let final_width = gapped_width.saturating_sub(2 * border_width as u16);
+                let final_height = gapped_height.saturating_sub(2 * border_width as u16);
 
                 tracing::debug!(
-                    "apply_layout: FLOATING window={} at ({}, {}) size {}x{} (raising)",
-                    window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
+                    "apply_layout: TILED window={} at ({}, {}) size {}x{}",
+                    window, gapped_x, gapped_y, final_width.max(1), final_height.max(1)
                 );
 
-                // Configure geometry
                 self.conn.configure_window(
-                    window_id,
-                    geom.x,
-                    geom.y,
-                    adjusted_width.max(1),
-                    adjusted_height.max(1),
+                    *window,
+                    gapped_x,
+                    gapped_y,
+                    final_width.max(1),
+                    final_height.max(1),
                     border_width,
                 )?;
+            }
 
-                // Raise to top of stack (each subsequent window goes above the previous)
-                let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
-                self.conn.conn.configure_window(window_id, &aux)?;
-            } else {
-                tracing::warn!("apply_layout: floating window {} not in windows map!", window_id);
+            // 2. Configure floating windows and stack them above tiled
+            let floating_ids: Vec<XWindow> = ws.floating.clone();
+
+            for window_id in floating_ids {
+                // Get the window's floating geometry from our state
+                if let Some(win) = self.windows.get(&window_id) {
+                    let geom = win.floating_geometry;
+                    let adjusted_width = geom.width.saturating_sub(2 * border_width as u16);
+                    let adjusted_height = geom.height.saturating_sub(2 * border_width as u16);
+
+                    tracing::debug!(
+                        "apply_layout: FLOATING window={} at ({}, {}) size {}x{} (raising)",
+                        window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
+                    );
+
+                    // Configure geometry
+                    self.conn.configure_window(
+                        window_id,
+                        geom.x,
+                        geom.y,
+                        adjusted_width.max(1),
+                        adjusted_height.max(1),
+                        border_width,
+                    )?;
+
+                    // Raise to top of stack (each subsequent window goes above the previous)
+                    let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+                    self.conn.conn.configure_window(window_id, &aux)?;
+                } else {
+                    tracing::warn!("apply_layout: floating window {} not in windows map!", window_id);
+                }
             }
         }
 
         self.update_borders()?;
         self.conn.flush()?;
         Ok(())
+    }
+
+    /// Check if a workspace is currently visible (active on any monitor).
+    pub fn is_workspace_visible(&self, ws_idx: usize) -> bool {
+        self.monitors.iter().any(|m| m.active_workspace == ws_idx)
+    }
+
+    /// Get all currently visible workspace indices.
+    pub fn visible_workspaces(&self) -> Vec<usize> {
+        self.monitors.iter().map(|m| m.active_workspace).collect()
     }
 }
 

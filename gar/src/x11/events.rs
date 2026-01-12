@@ -3,8 +3,8 @@ use std::process::Command;
 use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::xproto::{
     ButtonPressEvent, ButtonReleaseEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt,
-    DestroyNotifyEvent, EventMask, KeyPressEvent, MapRequestEvent, ModMask, MotionNotifyEvent,
-    StackMode, UnmapNotifyEvent,
+    DestroyNotifyEvent, EnterNotifyEvent, EventMask, KeyPressEvent, MapRequestEvent, ModMask,
+    MotionNotifyEvent, NotifyMode, StackMode, UnmapNotifyEvent,
 };
 use x11rb::protocol::Event;
 
@@ -165,7 +165,7 @@ impl WindowManager {
             Event::MotionNotify(e) => self.handle_motion_notify(e)?,
             Event::KeyPress(e) => self.handle_key_press(e)?,
             Event::EnterNotify(e) => {
-                tracing::trace!("EnterNotify for window {}", e.event);
+                self.handle_enter_notify(e)?;
             }
             Event::RandrScreenChangeNotify(_) => {
                 tracing::info!("RandR screen change detected, refreshing monitors");
@@ -438,6 +438,56 @@ impl WindowManager {
         Ok(())
     }
 
+    fn handle_enter_notify(&mut self, event: EnterNotifyEvent) -> Result<()> {
+        let window = event.event;
+
+        // Ignore if we're in a drag operation
+        if self.drag_state.is_some() {
+            return Ok(());
+        }
+
+        // Suppress EnterNotify events that happen shortly after a pointer warp
+        // This prevents feedback loops from mouse-follows-focus
+        if self.last_warp.elapsed() < std::time::Duration::from_millis(50) {
+            return Ok(());
+        }
+
+        // Ignore inferior (entering from a child window) and non-normal modes
+        // Only handle "Normal" mode enters (actual mouse movement)
+        if event.mode != NotifyMode::NORMAL {
+            return Ok(());
+        }
+
+        // Only focus windows we manage
+        if !self.windows.contains_key(&window) {
+            return Ok(());
+        }
+
+        // Don't focus if already focused
+        if self.focused_window == Some(window) {
+            return Ok(());
+        }
+
+        tracing::debug!("Focus follows mouse: focusing window {}", window);
+
+        // Regrab button on old focused window
+        if let Some(old) = self.focused_window {
+            self.conn.grab_button(old)?;
+        }
+
+        // Focus the new window (this will warp pointer back, but we'll suppress the resulting EnterNotify)
+        self.set_focus(window)?;
+        self.conn.ungrab_button(window)?;
+
+        // Raise floating windows on focus
+        if self.is_floating(window) {
+            self.raise_window(window)?;
+        }
+
+        self.conn.flush()?;
+        Ok(())
+    }
+
     fn handle_key_press(&mut self, event: KeyPressEvent) -> Result<()> {
         let keycode = event.detail;
         let state = event.state;
@@ -482,6 +532,11 @@ impl WindowManager {
             Action::CloseWindow => {
                 if let Some(window) = self.focused_window {
                     self.close_window(window)?;
+                }
+            }
+            Action::ForceCloseWindow => {
+                if let Some(window) = self.focused_window {
+                    self.force_close_window(window)?;
                 }
             }
             Action::Focus(direction) => {
@@ -541,14 +596,20 @@ impl WindowManager {
     }
 
     fn close_window(&mut self, window: u32) -> Result<()> {
+        // Verify we actually have a window to close
+        if !self.windows.contains_key(&window) {
+            tracing::warn!("close_window called on unmanaged window {}", window);
+            return Ok(());
+        }
+
         tracing::info!("Closing window {}", window);
 
         // Try graceful ICCCM close first
         if self.conn.supports_delete_window(window) {
-            tracing::debug!("Window {} supports WM_DELETE_WINDOW, sending graceful close", window);
+            tracing::info!("Window {} supports WM_DELETE_WINDOW, sending graceful close", window);
             self.conn.send_delete_window(window)?;
         } else {
-            tracing::debug!("Window {} doesn't support WM_DELETE_WINDOW, using kill_client", window);
+            tracing::info!("Window {} doesn't support WM_DELETE_WINDOW, using kill_client", window);
             self.conn.conn.kill_client(window)?;
         }
 
@@ -556,9 +617,17 @@ impl WindowManager {
         Ok(())
     }
 
+    fn force_close_window(&mut self, window: u32) -> Result<()> {
+        tracing::info!("Force closing window {}", window);
+        self.conn.conn.kill_client(window)?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
     fn focus_direction(&mut self, direction: Direction) -> Result<()> {
         let Some(focused) = self.focused_window else {
-            return Ok(());
+            // No focused window - try to focus adjacent monitor
+            return self.focus_adjacent_monitor(direction);
         };
 
         let screen = self.screen_rect();
@@ -574,8 +643,65 @@ impl WindowManager {
             self.conn.flush()?;
 
             tracing::debug!("Focused {:?} to window {}", direction, target);
+        } else {
+            // No adjacent window on this workspace - try adjacent monitor
+            self.focus_adjacent_monitor(direction)?;
         }
 
+        Ok(())
+    }
+
+    /// Focus the adjacent monitor in the given direction (does NOT wrap at edges)
+    fn focus_adjacent_monitor(&mut self, direction: Direction) -> Result<()> {
+        if self.monitors.len() <= 1 {
+            return Ok(());
+        }
+
+        // Calculate target index WITHOUT wrapping
+        let target_idx = match direction {
+            Direction::Left => {
+                if self.focused_monitor == 0 {
+                    // At leftmost monitor - do nothing
+                    return Ok(());
+                }
+                self.focused_monitor - 1
+            }
+            Direction::Right => {
+                if self.focused_monitor >= self.monitors.len() - 1 {
+                    // At rightmost monitor - do nothing
+                    return Ok(());
+                }
+                self.focused_monitor + 1
+            }
+            // Up/Down could navigate if monitors are stacked vertically
+            Direction::Up | Direction::Down => return Ok(()),
+        };
+
+        tracing::info!("Moving focus from monitor {} to {}", self.focused_monitor, target_idx);
+        self.focused_monitor = target_idx;
+
+        // Focus the active workspace on that monitor
+        let workspace_idx = self.monitors[target_idx].active_workspace;
+        self.focused_workspace = workspace_idx;
+
+        // Focus a window on that workspace if any, or just warp to monitor center
+        if let Some(window) = self.workspaces[workspace_idx].focused
+            .or_else(|| self.workspaces[workspace_idx].floating.last().copied())
+            .or_else(|| self.workspaces[workspace_idx].tree.first_window())
+        {
+            if let Some(old) = self.focused_window {
+                self.conn.grab_button(old)?;
+            }
+            self.set_focus(window)?;
+            self.conn.ungrab_button(window)?;
+        } else {
+            // No windows on target monitor - clear focus and warp to monitor center
+            self.focused_window = None;
+            self.warp_to_monitor(target_idx)?;
+            tracing::debug!("No windows on monitor {}, warped to center", target_idx);
+        }
+
+        self.conn.flush()?;
         Ok(())
     }
 
@@ -632,66 +758,49 @@ impl WindowManager {
         }
 
         // Find which monitor owns this workspace
-        let target_monitor = self.monitor_idx_for_workspace(idx);
+        let target_monitor_idx = self.monitor_idx_for_workspace(idx).unwrap_or(0);
+        let old_ws_on_target = self.monitors[target_monitor_idx].active_workspace;
 
-        // If the workspace is on a different monitor, just focus that monitor
-        if let Some(mon_idx) = target_monitor {
-            if mon_idx != self.focused_monitor {
-                tracing::info!("Workspace {} is on monitor {}, switching focus", idx + 1, mon_idx);
-                self.focused_monitor = mon_idx;
-                self.focused_workspace = idx;
-                self.monitors[mon_idx].active_workspace = idx;
-                self.conn.set_current_desktop(idx as u32)?;
-
-                // Focus a window on the target workspace
-                let ws = &self.workspaces[idx];
-                if let Some(window) = ws.focused
-                    .or_else(|| ws.floating.last().copied())
-                    .or_else(|| ws.tree.first_window())
-                {
-                    self.set_focus(window)?;
-                } else {
-                    self.focused_window = None;
-                }
-                self.conn.flush()?;
-                return Ok(());
-            }
-        }
-
-        // Same monitor - switch its active workspace
-        if idx == self.focused_workspace {
+        // Already on this workspace?
+        if idx == old_ws_on_target && target_monitor_idx == self.focused_monitor {
             return Ok(());
         }
 
-        tracing::info!("Switching to workspace {}", idx + 1);
+        tracing::info!(
+            "Switching to workspace {} on monitor {} (was ws {})",
+            idx + 1, target_monitor_idx, old_ws_on_target + 1
+        );
 
-        // Hide all windows on current workspace (tiled + floating)
-        for window in self.current_workspace().all_windows() {
-            self.conn.unmap_window(window)?;
+        // If switching to a different workspace on the target monitor, hide old/show new
+        if idx != old_ws_on_target {
+            // Hide windows on old workspace
+            for window in self.workspaces[old_ws_on_target].all_windows() {
+                self.conn.unmap_window(window)?;
+            }
+
+            // Update monitor's active workspace
+            self.monitors[target_monitor_idx].active_workspace = idx;
+
+            // Show windows on new workspace
+            for window in self.workspaces[idx].all_windows() {
+                self.conn.map_window(window)?;
+            }
         }
 
-        // Update monitor's active workspace
-        let old_ws = self.focused_workspace;
+        // Update focused state
+        self.focused_monitor = target_monitor_idx;
         self.focused_workspace = idx;
-        self.monitors[self.focused_monitor].active_workspace = idx;
 
         // Update EWMH _NET_CURRENT_DESKTOP
         self.conn.set_current_desktop(idx as u32)?;
 
-        // Show all windows on new workspace (tiled + floating)
-        for window in self.current_workspace().all_windows() {
-            self.conn.map_window(window)?;
-        }
-
-        // Apply layout and update focus
+        // Apply layout
         self.apply_layout()?;
 
-        // Focus the workspace's focused window, preferring floating on top
-        if let Some(window) = self
-            .current_workspace()
-            .focused
-            .or_else(|| self.current_workspace().floating.last().copied())
-            .or_else(|| self.current_workspace().tree.first_window())
+        // Focus a window on the target workspace
+        if let Some(window) = self.workspaces[idx].focused
+            .or_else(|| self.workspaces[idx].floating.last().copied())
+            .or_else(|| self.workspaces[idx].tree.first_window())
         {
             self.set_focus(window)?;
             self.conn.ungrab_button(window)?;
@@ -699,7 +808,6 @@ impl WindowManager {
             self.focused_window = None;
         }
 
-        tracing::debug!("Switched from workspace {} to {}", old_ws + 1, idx + 1);
         self.conn.flush()?;
         Ok(())
     }
@@ -1130,7 +1238,7 @@ impl WindowManager {
         let workspace_idx = self.monitors[target_idx].active_workspace;
         self.focused_workspace = workspace_idx;
 
-        // Focus a window on that workspace if any
+        // Focus a window on that workspace if any, or warp to monitor center
         if let Some(window) = self.workspaces[workspace_idx].focused
             .or_else(|| self.workspaces[workspace_idx].floating.last().copied())
             .or_else(|| self.workspaces[workspace_idx].tree.first_window())
@@ -1141,7 +1249,9 @@ impl WindowManager {
             self.set_focus(window)?;
             self.conn.ungrab_button(window)?;
         } else {
+            // No windows - warp to monitor center
             self.focused_window = None;
+            self.warp_to_monitor(target_idx)?;
         }
 
         self.conn.flush()?;
