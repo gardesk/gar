@@ -645,17 +645,25 @@ impl WindowManager {
         let gap_inner = self.config.gap_inner as i16;
         let half_gap = gap_inner / 2;
 
-        // Calculate combined struts from all dock windows
-        let mut strut_left: u32 = 0;
-        let mut strut_right: u32 = 0;
-        let mut strut_top: u32 = 0;
-        let mut strut_bottom: u32 = 0;
-        for strut in self.dock_struts.values() {
-            strut_left = strut_left.max(strut.left);
-            strut_right = strut_right.max(strut.right);
-            strut_top = strut_top.max(strut.top);
-            strut_bottom = strut_bottom.max(strut.bottom);
-        }
+        // Calculate reserved space for bars/panels
+        // If bar_height is set, use it directly; otherwise use struts from dock windows
+        let (strut_left, strut_right, strut_top, strut_bottom) = if self.config.bar_height > 0 {
+            // Manual bar height overrides struts (assumes bar at top)
+            (0u32, 0u32, self.config.bar_height, 0u32)
+        } else {
+            // Calculate combined struts from all dock windows
+            let mut left: u32 = 0;
+            let mut right: u32 = 0;
+            let mut top: u32 = 0;
+            let mut bottom: u32 = 0;
+            for strut in self.dock_struts.values() {
+                left = left.max(strut.left);
+                right = right.max(strut.right);
+                top = top.max(strut.top);
+                bottom = bottom.max(strut.bottom);
+            }
+            (left, right, top, bottom)
+        };
 
         // Collect visible workspaces (one per monitor)
         let visible_workspaces: Vec<(usize, Rect)> = self.monitors

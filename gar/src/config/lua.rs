@@ -287,6 +287,11 @@ impl LuaConfig {
                         state.config.mouse_follows_focus = v;
                     }
                 }
+                "bar_height" => {
+                    if let Value::Integer(v) = value {
+                        state.config.bar_height = v as u32;
+                    }
+                }
                 _ => {
                     tracing::warn!("Unknown config key: {}", key);
                 }

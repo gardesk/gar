@@ -19,6 +19,8 @@ pub struct Config {
     // Behavior settings
     pub follow_window_on_move: bool,
     pub mouse_follows_focus: bool,
+    // Manual bar/panel reserved space (overrides struts)
+    pub bar_height: u32,
 }
 
 impl Default for Config {
@@ -40,6 +42,8 @@ impl Default for Config {
             follow_window_on_move: false,
             // Behavior: warp mouse pointer to center of focused window
             mouse_follows_focus: false,
+            // Manual bar height (0 = use struts from dock windows)
+            bar_height: 0,
         }
     }
 }
