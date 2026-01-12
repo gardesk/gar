@@ -320,6 +320,17 @@ impl WindowManager {
             return Ok(());
         }
 
+        // Check if we intentionally unmapped this window (workspace switch, move, etc.)
+        // If so, decrement the counter and ignore this UnmapNotify
+        if let Some(win) = self.windows.get_mut(&window) {
+            if win.ignore_unmap_count > 0 {
+                win.ignore_unmap_count -= 1;
+                tracing::debug!("Ignoring UnmapNotify for window {} (intentional unmap, count now {})",
+                    window, win.ignore_unmap_count);
+                return Ok(());
+            }
+        }
+
         // Check if this window is on a visible workspace (any monitor's active workspace)
         let is_visible = self.windows.get(&window)
             .map(|w| self.is_workspace_visible(w.workspace))
@@ -1069,6 +1080,10 @@ impl WindowManager {
 
             // Hide windows on old workspace
             for window in self.workspaces[old_ws].all_windows() {
+                // Mark as intentional unmap so UnmapNotify handler ignores it
+                if let Some(win) = self.windows.get_mut(&window) {
+                    win.ignore_unmap_count += 1;
+                }
                 self.conn.unmap_window(window)?;
                 // Also unmap frames if present
                 if let Some(frame) = self.frames.frame_for_client(window) {
@@ -1194,6 +1209,10 @@ impl WindowManager {
             self.conn.map_window(window)?;
         } else {
             // Target is not visible - hide the window
+            // Mark as intentional unmap so UnmapNotify handler ignores it
+            if let Some(win) = self.windows.get_mut(&window) {
+                win.ignore_unmap_count += 1;
+            }
             self.conn.unmap_window(window)?;
             if let Some(frame) = self.frames.frame_for_client(window) {
                 self.conn.unmap_window(frame)?;

@@ -21,6 +21,8 @@ pub struct Window {
     pub frame: Option<XWindow>,
     /// Window title (cached from _NET_WM_NAME or WM_NAME)
     pub title: String,
+    /// Count of UnmapNotify events to ignore (for intentional unmaps during workspace switch)
+    pub ignore_unmap_count: u32,
 }
 
 impl Window {
@@ -38,6 +40,7 @@ impl Window {
             workspace,
             frame: None,
             title: String::new(),
+            ignore_unmap_count: 0,
         }
     }
 
