@@ -232,6 +232,24 @@ impl Connection {
         Ok(())
     }
 
+    /// Warp the mouse pointer to the center of a window.
+    pub fn warp_pointer_to_window(&self, window: Window) -> Result<(), Error> {
+        // Get window geometry
+        let geom = self.conn.get_geometry(window)?.reply()?;
+        let center_x = (geom.width / 2) as i16;
+        let center_y = (geom.height / 2) as i16;
+
+        self.conn.warp_pointer(
+            x11rb::NONE,  // src_window (none = don't check source)
+            window,       // dst_window
+            0, 0,         // src_x, src_y (ignored when src_window is none)
+            0, 0,         // src_width, src_height (ignored)
+            center_x,     // dst_x (relative to dst_window)
+            center_y,     // dst_y (relative to dst_window)
+        )?;
+        Ok(())
+    }
+
     /// Set window border width and color.
     pub fn set_border(&self, window: Window, width: u32, color: u32) -> Result<(), Error> {
         let aux = ChangeWindowAttributesAux::new().border_pixel(color);
@@ -636,13 +654,27 @@ impl Connection {
             monitors.push(monitor);
         }
 
+        // Log raw (pre-sorted) monitor info from RandR
+        tracing::debug!("Raw monitor order from RandR:");
+        for m in &monitors {
+            tracing::debug!(
+                "  '{}' at ({}, {}) size {}x{}",
+                m.name, m.geometry.x, m.geometry.y, m.geometry.width, m.geometry.height
+            );
+        }
+
         // Sort monitors by X position (left to right)
         monitors.sort_by_key(|m| m.geometry.x);
 
-        tracing::info!("Detected {} monitors: {:?}",
-            monitors.len(),
-            monitors.iter().map(|m| &m.name).collect::<Vec<_>>()
-        );
+        // Log sorted monitor info
+        for (i, m) in monitors.iter().enumerate() {
+            tracing::info!(
+                "Monitor {}: '{}' at ({}, {}) size {}x{} {}",
+                i, m.name, m.geometry.x, m.geometry.y,
+                m.geometry.width, m.geometry.height,
+                if m.primary { "(primary)" } else { "" }
+            );
+        }
 
         Ok(monitors)
     }
