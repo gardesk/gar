@@ -22,6 +22,8 @@ pub enum Action {
     Exit,
     ToggleFloating,
     CycleFloating,
+    FocusMonitor(String),     // "next", "prev", or monitor name
+    MoveToMonitor(String),    // "next", "prev", or monitor name
     LuaCallback(usize), // Index into callback registry
 }
 
@@ -289,6 +291,14 @@ impl LuaConfig {
                                 let n: usize = t.get("workspace").unwrap_or(1);
                                 Action::MoveToWorkspace(n)
                             }
+                            "focus_monitor" => {
+                                let target: String = t.get("target").unwrap_or_default();
+                                Action::FocusMonitor(target)
+                            }
+                            "move_to_monitor" => {
+                                let target: String = t.get("target").unwrap_or_default();
+                                Action::MoveToMonitor(target)
+                            }
                             _ => {
                                 tracing::warn!("Unknown action type: {}", action_type);
                                 return Ok(());
@@ -459,6 +469,24 @@ impl LuaConfig {
             Ok(t)
         })?;
         gar.set("move_to_workspace", move_fn)?;
+
+        // gar.focus_monitor(target) - "next", "prev", or monitor name
+        let focus_monitor_fn = self.lua.create_function(|lua, target: String| {
+            let t = lua.create_table()?;
+            t.set("action", "focus_monitor")?;
+            t.set("target", target)?;
+            Ok(t)
+        })?;
+        gar.set("focus_monitor", focus_monitor_fn)?;
+
+        // gar.move_to_monitor(target) - "next", "prev", or monitor name
+        let move_to_monitor_fn = self.lua.create_function(|lua, target: String| {
+            let t = lua.create_table()?;
+            t.set("action", "move_to_monitor")?;
+            t.set("target", target)?;
+            Ok(t)
+        })?;
+        gar.set("move_to_monitor", move_to_monitor_fn)?;
 
         Ok(())
     }

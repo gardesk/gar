@@ -589,6 +589,74 @@ impl Connection {
         )?;
         Ok(())
     }
+
+    /// Detect connected monitors via RandR.
+    pub fn detect_monitors(&self) -> Result<Vec<crate::core::Monitor>, Error> {
+        use x11rb::protocol::randr::{self, ConnectionExt as RandrExt};
+        use crate::core::{Monitor, Rect};
+
+        let resources = self.conn.randr_get_screen_resources(self.root)?.reply()?;
+        let primary = self.conn.randr_get_output_primary(self.root)?.reply()?.output;
+
+        let mut monitors = Vec::new();
+
+        for &output in &resources.outputs {
+            let info = match self.conn.randr_get_output_info(output, 0)?.reply() {
+                Ok(info) => info,
+                Err(_) => continue,
+            };
+
+            // Skip disconnected outputs
+            if info.connection != randr::Connection::CONNECTED {
+                continue;
+            }
+
+            // Skip outputs without a CRTC (not active)
+            let crtc = match info.crtc {
+                0 => continue,
+                c => c,
+            };
+
+            let crtc_info = match self.conn.randr_get_crtc_info(crtc, 0)?.reply() {
+                Ok(info) => info,
+                Err(_) => continue,
+            };
+
+            let name = String::from_utf8_lossy(&info.name).to_string();
+            let geometry = Rect::new(
+                crtc_info.x,
+                crtc_info.y,
+                crtc_info.width,
+                crtc_info.height,
+            );
+
+            let mut monitor = Monitor::new(name, output, geometry);
+            monitor.primary = output == primary;
+
+            monitors.push(monitor);
+        }
+
+        // Sort monitors by X position (left to right)
+        monitors.sort_by_key(|m| m.geometry.x);
+
+        tracing::info!("Detected {} monitors: {:?}",
+            monitors.len(),
+            monitors.iter().map(|m| &m.name).collect::<Vec<_>>()
+        );
+
+        Ok(monitors)
+    }
+
+    /// Subscribe to RandR screen change events.
+    pub fn subscribe_randr_events(&self) -> Result<(), Error> {
+        use x11rb::protocol::randr::{self, ConnectionExt as RandrExt};
+
+        self.conn.randr_select_input(
+            self.root,
+            randr::NotifyMask::SCREEN_CHANGE | randr::NotifyMask::OUTPUT_CHANGE,
+        )?;
+        Ok(())
+    }
 }
 
 impl std::ops::Deref for Connection {

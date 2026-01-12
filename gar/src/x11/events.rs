@@ -167,6 +167,14 @@ impl WindowManager {
             Event::EnterNotify(e) => {
                 tracing::trace!("EnterNotify for window {}", e.event);
             }
+            Event::RandrScreenChangeNotify(_) => {
+                tracing::info!("RandR screen change detected, refreshing monitors");
+                self.refresh_monitors()?;
+            }
+            Event::RandrNotify(_) => {
+                tracing::info!("RandR notify event, refreshing monitors");
+                self.refresh_monitors()?;
+            }
             _ => {
                 tracing::trace!("Unhandled event: {:?}", event);
             }
@@ -517,6 +525,12 @@ impl WindowManager {
             Action::CycleFloating => {
                 self.cycle_floating()?;
             }
+            Action::FocusMonitor(target) => {
+                self.focus_monitor(&target)?;
+            }
+            Action::MoveToMonitor(target) => {
+                self.move_to_monitor(&target)?;
+            }
             Action::LuaCallback(index) => {
                 if let Err(e) = self.lua_config.execute_callback(index) {
                     tracing::error!("Lua callback error: {}", e);
@@ -613,7 +627,39 @@ impl WindowManager {
     }
 
     fn switch_workspace(&mut self, idx: usize) -> Result<()> {
-        if idx >= self.workspaces.len() || idx == self.focused_workspace {
+        if idx >= self.workspaces.len() {
+            return Ok(());
+        }
+
+        // Find which monitor owns this workspace
+        let target_monitor = self.monitor_idx_for_workspace(idx);
+
+        // If the workspace is on a different monitor, just focus that monitor
+        if let Some(mon_idx) = target_monitor {
+            if mon_idx != self.focused_monitor {
+                tracing::info!("Workspace {} is on monitor {}, switching focus", idx + 1, mon_idx);
+                self.focused_monitor = mon_idx;
+                self.focused_workspace = idx;
+                self.monitors[mon_idx].active_workspace = idx;
+                self.conn.set_current_desktop(idx as u32)?;
+
+                // Focus a window on the target workspace
+                let ws = &self.workspaces[idx];
+                if let Some(window) = ws.focused
+                    .or_else(|| ws.floating.last().copied())
+                    .or_else(|| ws.tree.first_window())
+                {
+                    self.set_focus(window)?;
+                } else {
+                    self.focused_window = None;
+                }
+                self.conn.flush()?;
+                return Ok(());
+            }
+        }
+
+        // Same monitor - switch its active workspace
+        if idx == self.focused_workspace {
             return Ok(());
         }
 
@@ -624,8 +670,10 @@ impl WindowManager {
             self.conn.unmap_window(window)?;
         }
 
-        // Switch workspace
+        // Update monitor's active workspace
+        let old_ws = self.focused_workspace;
         self.focused_workspace = idx;
+        self.monitors[self.focused_monitor].active_workspace = idx;
 
         // Update EWMH _NET_CURRENT_DESKTOP
         self.conn.set_current_desktop(idx as u32)?;
@@ -651,6 +699,7 @@ impl WindowManager {
             self.focused_window = None;
         }
 
+        tracing::debug!("Switched from workspace {} to {}", old_ws + 1, idx + 1);
         self.conn.flush()?;
         Ok(())
     }
@@ -691,12 +740,12 @@ impl WindowManager {
         // Hide the window (it's moving to another workspace)
         self.conn.unmap_window(window)?;
 
-        // Insert into target workspace
+        // Insert into target workspace (use target monitor's geometry)
         if is_floating {
             self.workspaces[idx].add_floating(window);
         } else {
             let target_focused = self.workspaces[idx].focused;
-            let screen = self.screen_rect();
+            let screen = self.workspace_rect(idx);
             self.workspaces[idx]
                 .tree
                 .insert_with_rect(window, target_focused, screen);
@@ -896,6 +945,23 @@ impl WindowManager {
                 // Handle subscription in handle_ipc directly
                 Response::success(None)
             }
+            "focus_monitor" => {
+                let target = args.get("target").and_then(|v| v.as_str()).unwrap_or("next");
+                match self.focus_monitor(target) {
+                    Ok(_) => Response::success(None),
+                    Err(e) => Response::error(e.to_string()),
+                }
+            }
+            "move_to_monitor" => {
+                let target = args.get("target").and_then(|v| v.as_str()).unwrap_or("next");
+                match self.move_to_monitor(target) {
+                    Ok(_) => Response::success(None),
+                    Err(e) => Response::error(e.to_string()),
+                }
+            }
+            "get_monitors" => {
+                Response::success(Some(self.get_monitors_json()))
+            }
             _ => Response::error(format!("Unknown command: {}", command)),
         }
     }
@@ -944,6 +1010,25 @@ impl WindowManager {
                 })
             }).collect::<Vec<_>>()
         })
+    }
+
+    /// Get monitor info as JSON
+    fn get_monitors_json(&self) -> serde_json::Value {
+        serde_json::json!(self.monitors.iter().enumerate().map(|(i, mon)| {
+            serde_json::json!({
+                "name": mon.name,
+                "focused": i == self.focused_monitor,
+                "primary": mon.primary,
+                "geometry": {
+                    "x": mon.geometry.x,
+                    "y": mon.geometry.y,
+                    "width": mon.geometry.width,
+                    "height": mon.geometry.height,
+                },
+                "workspaces": mon.workspaces.iter().map(|ws| ws + 1).collect::<Vec<_>>(),
+                "active_workspace": mon.active_workspace + 1,
+            })
+        }).collect::<Vec<_>>())
     }
 
     // Floating window helpers
@@ -1002,6 +1087,140 @@ impl WindowManager {
         // Raise in X11
         let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
         self.conn.conn.configure_window(window, &aux)?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Focus a different monitor.
+    /// Target can be "next", "prev", "left", "right", or a monitor name.
+    fn focus_monitor(&mut self, target: &str) -> Result<()> {
+        if self.monitors.len() <= 1 {
+            return Ok(());
+        }
+
+        let target_idx = match target.to_lowercase().as_str() {
+            "next" | "right" => (self.focused_monitor + 1) % self.monitors.len(),
+            "prev" | "left" => {
+                if self.focused_monitor == 0 {
+                    self.monitors.len() - 1
+                } else {
+                    self.focused_monitor - 1
+                }
+            }
+            name => {
+                // Find monitor by name
+                match self.monitors.iter().position(|m| m.name.eq_ignore_ascii_case(name)) {
+                    Some(idx) => idx,
+                    None => {
+                        tracing::warn!("Monitor '{}' not found", name);
+                        return Ok(());
+                    }
+                }
+            }
+        };
+
+        if target_idx == self.focused_monitor {
+            return Ok(());
+        }
+
+        tracing::info!("Focusing monitor {}: '{}'", target_idx, self.monitors[target_idx].name);
+        self.focused_monitor = target_idx;
+
+        // Focus the active workspace on that monitor
+        let workspace_idx = self.monitors[target_idx].active_workspace;
+        self.focused_workspace = workspace_idx;
+
+        // Focus a window on that workspace if any
+        if let Some(window) = self.workspaces[workspace_idx].focused
+            .or_else(|| self.workspaces[workspace_idx].floating.last().copied())
+            .or_else(|| self.workspaces[workspace_idx].tree.first_window())
+        {
+            if let Some(old) = self.focused_window {
+                self.conn.grab_button(old)?;
+            }
+            self.set_focus(window)?;
+            self.conn.ungrab_button(window)?;
+        } else {
+            self.focused_window = None;
+        }
+
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Move focused window to another monitor.
+    /// Target can be "next", "prev", "left", "right", or a monitor name.
+    fn move_to_monitor(&mut self, target: &str) -> Result<()> {
+        if self.monitors.len() <= 1 {
+            return Ok(());
+        }
+
+        let Some(window) = self.focused_window else {
+            return Ok(());
+        };
+
+        let target_idx = match target.to_lowercase().as_str() {
+            "next" | "right" => (self.focused_monitor + 1) % self.monitors.len(),
+            "prev" | "left" => {
+                if self.focused_monitor == 0 {
+                    self.monitors.len() - 1
+                } else {
+                    self.focused_monitor - 1
+                }
+            }
+            name => {
+                match self.monitors.iter().position(|m| m.name.eq_ignore_ascii_case(name)) {
+                    Some(idx) => idx,
+                    None => {
+                        tracing::warn!("Monitor '{}' not found", name);
+                        return Ok(());
+                    }
+                }
+            }
+        };
+
+        if target_idx == self.focused_monitor {
+            return Ok(());
+        }
+
+        let is_floating = self.windows.get(&window).map(|w| w.floating).unwrap_or(false);
+        let target_workspace = self.monitors[target_idx].active_workspace;
+
+        tracing::info!("Moving window {} to monitor {}: '{}' (workspace {})",
+            window, target_idx, self.monitors[target_idx].name, target_workspace + 1);
+
+        // Remove from current workspace
+        if is_floating {
+            self.current_workspace_mut().remove_floating(window);
+        } else {
+            self.current_workspace_mut().tree.remove(window);
+        }
+
+        // Update window's workspace
+        if let Some(win) = self.windows.get_mut(&window) {
+            win.workspace = target_workspace;
+        }
+
+        // Add to target workspace
+        if is_floating {
+            self.workspaces[target_workspace].add_floating(window);
+        } else {
+            let target_focused = self.workspaces[target_workspace].focused;
+            let target_rect = self.monitors[target_idx].geometry;
+            self.workspaces[target_workspace].tree.insert_with_rect(window, target_focused, target_rect);
+        }
+
+        // Update EWMH
+        self.conn.set_window_desktop(window, target_workspace as u32)?;
+
+        // Focus follows window to new monitor
+        self.focused_monitor = target_idx;
+        self.focused_workspace = target_workspace;
+        self.workspaces[target_workspace].focused = Some(window);
+
+        // Apply layouts on both monitors
+        self.apply_layout()?;
+
         self.conn.flush()?;
         Ok(())
     }

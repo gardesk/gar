@@ -59,6 +59,18 @@ enum Command {
     GetFocused,
     /// Get window tree
     GetTree,
+    /// Focus monitor (next, prev, or name)
+    FocusMonitor {
+        /// Target: next, prev, left, right, or monitor name
+        target: String,
+    },
+    /// Move focused window to monitor
+    MoveToMonitor {
+        /// Target: next, prev, left, right, or monitor name
+        target: String,
+    },
+    /// Get monitor information
+    GetMonitors,
 }
 
 fn get_socket_path() -> PathBuf {
@@ -131,6 +143,15 @@ fn main() {
         }
         Command::GetTree => {
             json!({ "command": "get_tree", "args": {} })
+        }
+        Command::FocusMonitor { target } => {
+            json!({ "command": "focus_monitor", "args": { "target": target } })
+        }
+        Command::MoveToMonitor { target } => {
+            json!({ "command": "move_to_monitor", "args": { "target": target } })
+        }
+        Command::GetMonitors => {
+            json!({ "command": "get_monitors", "args": {} })
         }
     };
 

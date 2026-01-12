@@ -9,8 +9,8 @@ gar.set("gap_inner", 8)
 gar.set("gap_outer", 8)
 
 -- Mod key: "mod" = Super/Win, "alt" = Alt
--- Using alt for testing in nested X (i3 grabs super)
-local mod = "alt"
+-- Use "mod" for real X session, "alt" for nested testing (Xephyr)
+local mod = "mod"
 
 -- Terminal
 gar.bind(mod .. "+Return", function()
@@ -22,6 +22,9 @@ gar.bind(mod .. "+q", gar.close_window)
 
 -- Reload config
 gar.bind(mod .. "+shift+r", gar.reload)
+
+-- PANIC: Exit gar immediately (mod+shift+Escape)
+gar.bind(mod .. "+shift+Escape", gar.exit)
 
 -- Focus navigation (arrow keys)
 gar.bind(mod .. "+Left", gar.focus("left"))
@@ -73,3 +76,9 @@ for i = 1, 9 do
 end
 gar.bind(mod .. "+0", gar.workspace(10))
 gar.bind(mod .. "+shift+0", gar.move_to_workspace(10))
+
+-- Multi-monitor (comma/period = prev/next)
+gar.bind(mod .. "+comma", gar.focus_monitor("prev"))
+gar.bind(mod .. "+period", gar.focus_monitor("next"))
+gar.bind(mod .. "+shift+comma", gar.move_to_monitor("prev"))
+gar.bind(mod .. "+shift+period", gar.move_to_monitor("next"))

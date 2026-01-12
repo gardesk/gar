@@ -28,6 +28,7 @@ pub struct WindowManager {
     pub windows: HashMap<XWindow, Window>,
     pub focused_workspace: usize,
     pub focused_window: Option<XWindow>,
+    pub focused_monitor: usize,
     pub running: bool,
     pub drag_state: Option<DragState>,
     pub ipc_server: Option<IpcServer>,
@@ -35,7 +36,7 @@ pub struct WindowManager {
 
 impl WindowManager {
     pub fn new(conn: Connection) -> Result<Self> {
-        let workspaces = (1..=10)
+        let workspaces: Vec<Workspace> = (1..=10)
             .map(|i| Workspace::new(i, i.to_string()))
             .collect();
 
@@ -60,16 +61,53 @@ impl WindowManager {
             }
         };
 
+        // Subscribe to RandR events for hotplug
+        if let Err(e) = conn.subscribe_randr_events() {
+            tracing::warn!("Failed to subscribe to RandR events: {}", e);
+        }
+
+        // Detect monitors
+        let mut monitors = conn.detect_monitors().unwrap_or_else(|e| {
+            tracing::warn!("Failed to detect monitors: {}, using single screen", e);
+            vec![Monitor::new(
+                "default".to_string(),
+                0,
+                Rect::new(0, 0, conn.screen_width, conn.screen_height),
+            )]
+        });
+
+        // Ensure at least one monitor
+        if monitors.is_empty() {
+            monitors.push(Monitor::new(
+                "default".to_string(),
+                0,
+                Rect::new(0, 0, conn.screen_width, conn.screen_height),
+            ));
+        }
+
+        // Assign workspaces to monitors
+        let ws_count = workspaces.len();
+        let mon_count = monitors.len();
+        for (i, monitor) in monitors.iter_mut().enumerate() {
+            // Distribute workspaces: first monitor gets ws 1-N/M, etc.
+            let start = i * ws_count / mon_count;
+            let end = (i + 1) * ws_count / mon_count;
+            monitor.workspaces = (start..end).collect();
+            monitor.active_workspace = start;
+            tracing::debug!("Monitor '{}' assigned workspaces {:?}", monitor.name, monitor.workspaces);
+        }
+
         Ok(Self {
             conn,
             config,
             lua_config,
             lua_state,
             workspaces,
-            monitors: Vec::new(),
+            monitors,
             windows: HashMap::new(),
             focused_workspace: 0,
             focused_window: None,
+            focused_monitor: 0,
             running: true,
             drag_state: None,
             ipc_server,
@@ -84,9 +122,76 @@ impl WindowManager {
         &mut self.workspaces[self.focused_workspace]
     }
 
-    /// Get the screen rectangle (full usable area).
+    pub fn current_monitor(&self) -> &Monitor {
+        &self.monitors[self.focused_monitor]
+    }
+
+    /// Get the rectangle for the focused monitor.
     pub fn screen_rect(&self) -> Rect {
-        Rect::new(0, 0, self.conn.screen_width, self.conn.screen_height)
+        self.monitors[self.focused_monitor].geometry
+    }
+
+    /// Get the rectangle for a specific workspace's monitor.
+    pub fn workspace_rect(&self, workspace_idx: usize) -> Rect {
+        self.monitor_for_workspace(workspace_idx)
+            .map(|m| m.geometry)
+            .unwrap_or_else(|| Rect::new(0, 0, self.conn.screen_width, self.conn.screen_height))
+    }
+
+    /// Find which monitor a workspace belongs to.
+    pub fn monitor_for_workspace(&self, workspace_idx: usize) -> Option<&Monitor> {
+        self.monitors.iter().find(|m| m.workspaces.contains(&workspace_idx))
+    }
+
+    /// Find the monitor index for a workspace.
+    pub fn monitor_idx_for_workspace(&self, workspace_idx: usize) -> Option<usize> {
+        self.monitors.iter().position(|m| m.workspaces.contains(&workspace_idx))
+    }
+
+    /// Refresh monitors (called on RandR screen change).
+    pub fn refresh_monitors(&mut self) -> Result<()> {
+        tracing::info!("Refreshing monitor configuration");
+
+        let mut new_monitors = self.conn.detect_monitors().unwrap_or_else(|e| {
+            tracing::warn!("Failed to detect monitors: {}, keeping current", e);
+            return self.monitors.clone();
+        });
+
+        if new_monitors.is_empty() {
+            new_monitors.push(Monitor::new(
+                "default".to_string(),
+                0,
+                Rect::new(0, 0, self.conn.screen_width, self.conn.screen_height),
+            ));
+        }
+
+        // Reassign workspaces to monitors
+        let ws_count = self.workspaces.len();
+        let mon_count = new_monitors.len();
+        for (i, monitor) in new_monitors.iter_mut().enumerate() {
+            let start = i * ws_count / mon_count;
+            let end = (i + 1) * ws_count / mon_count;
+            monitor.workspaces = (start..end).collect();
+            monitor.active_workspace = start;
+            tracing::info!("Monitor '{}' assigned workspaces {:?}", monitor.name, monitor.workspaces);
+        }
+
+        self.monitors = new_monitors;
+
+        // Ensure focused_monitor is valid
+        if self.focused_monitor >= self.monitors.len() {
+            self.focused_monitor = 0;
+        }
+
+        // Ensure focused_workspace is on the focused monitor
+        if !self.monitors[self.focused_monitor].workspaces.contains(&self.focused_workspace) {
+            self.focused_workspace = self.monitors[self.focused_monitor].active_workspace;
+        }
+
+        // Re-apply layout for visible workspaces
+        self.apply_layout()?;
+
+        Ok(())
     }
 
     /// Check if a window should be managed (not override-redirect, etc.)
