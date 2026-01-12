@@ -31,12 +31,17 @@ pub enum DragState {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeEdge {
     TopLeft,
+    Top,
     TopRight,
+    Left,
+    Right,
     BottomLeft,
+    Bottom,
     BottomRight,
+    None,
 }
 
 impl WindowManager {
@@ -124,21 +129,25 @@ impl WindowManager {
                 continue;
             }
 
-            // Subscribe to events on the window
-            self.conn.select_input(
-                window,
-                EventMask::ENTER_WINDOW
-                    | EventMask::FOCUS_CHANGE
-                    | EventMask::PROPERTY_CHANGE
-                    | EventMask::STRUCTURE_NOTIFY,
-            )?;
-
-            // Grab button for click-to-focus
-            self.conn.grab_button(window)?;
-
             // Check window rules and EWMH hints
             let rule_actions = self.check_rules(window);
             let should_float = rule_actions.floating.unwrap_or_else(|| self.conn.should_float(window));
+
+            // Subscribe to events on the window
+            // Floating windows get POINTER_MOTION for edge resize cursors
+            let base_events = EventMask::ENTER_WINDOW
+                | EventMask::FOCUS_CHANGE
+                | EventMask::PROPERTY_CHANGE
+                | EventMask::STRUCTURE_NOTIFY;
+            let events = if should_float {
+                base_events | EventMask::POINTER_MOTION
+            } else {
+                base_events
+            };
+            self.conn.select_input(window, events)?;
+
+            // Grab button for click-to-focus
+            self.conn.grab_button(window)?;
 
             // Manage the window
             if should_float {
@@ -154,7 +163,10 @@ impl WindowManager {
             // Focus the first window
             if let Some(window) = self.focused_window {
                 self.set_focus(window, true)?;
-                self.conn.ungrab_button(window)?;
+                // Ungrab button for click-through (unless floating - keep for edge resize)
+                if !self.is_floating(window) {
+                    self.conn.ungrab_button(window)?;
+                }
             }
             tracing::info!("Adopted {} existing windows", adopted);
         }
@@ -233,18 +245,6 @@ impl WindowManager {
             return Ok(());
         }
 
-        // Subscribe to events on the window
-        self.conn.select_input(
-            window,
-            EventMask::ENTER_WINDOW
-                | EventMask::FOCUS_CHANGE
-                | EventMask::PROPERTY_CHANGE
-                | EventMask::STRUCTURE_NOTIFY,
-        )?;
-
-        // Grab button for click-to-focus
-        self.conn.grab_button(window)?;
-
         // Check window rules first
         let rule_actions = self.check_rules(window);
 
@@ -254,6 +254,22 @@ impl WindowManager {
 
         // Determine if window should float (rule > ICCCM/EWMH hints)
         let should_float = rule_actions.floating.unwrap_or_else(|| self.conn.should_float(window));
+
+        // Subscribe to events on the window
+        // Floating windows get POINTER_MOTION for edge resize cursors
+        let base_events = EventMask::ENTER_WINDOW
+            | EventMask::FOCUS_CHANGE
+            | EventMask::PROPERTY_CHANGE
+            | EventMask::STRUCTURE_NOTIFY;
+        let events = if should_float {
+            base_events | EventMask::POINTER_MOTION
+        } else {
+            base_events
+        };
+        self.conn.select_input(window, events)?;
+
+        // Grab button for click-to-focus
+        self.conn.grab_button(window)?;
 
         // Manage window on target workspace
         if target_idx != self.focused_workspace {
@@ -403,8 +419,16 @@ impl WindowManager {
         let child = event.child;
         tracing::debug!("ButtonPress on window {}, child {}, button {}", window, child, event.detail);
 
+        // If we're already in a drag, ignore additional button presses
+        if self.drag_state.is_some() {
+            tracing::debug!("Already in drag state, ignoring ButtonPress");
+            return Ok(());
+        }
+
         // Check for mod+click on floating windows (move/resize)
-        let has_mod = event.state.contains(x11rb::protocol::xproto::KeyButMask::MOD1);
+        // Support both Alt (MOD1) and Super (MOD4) as the modifier
+        let has_mod = event.state.contains(x11rb::protocol::xproto::KeyButMask::MOD1)
+            || event.state.contains(x11rb::protocol::xproto::KeyButMask::MOD4);
 
         // For Alt+click from root grab, use child window (the window under cursor)
         let target = if window == self.conn.root && child != 0 {
@@ -429,8 +453,8 @@ impl WindowManager {
                 self.conn.grab_pointer(target)?;
                 return Ok(());
             } else if event.detail == 3 {
-                // Mod+Button3 = Resize
-                let edge = determine_resize_edge(&geometry, event.root_x, event.root_y);
+                // Mod+Button3 = Resize (quadrant-based edge detection)
+                let edge = determine_resize_edge_quadrant(&geometry, event.root_x, event.root_y);
                 tracing::debug!("Starting resize for floating window {}, edge {:?}", target, edge);
                 self.drag_state = Some(DragState::Resize {
                     window: target,
@@ -444,6 +468,45 @@ impl WindowManager {
             }
         }
 
+        // Check for edge resize on floating windows (click on edge without mod key)
+        let is_floating_win = self.is_floating(window);
+        tracing::debug!(
+            "Edge resize check: window={}, is_floating={}, button={}, pos=({},{})",
+            window, is_floating_win, event.detail, event.root_x, event.root_y
+        );
+
+        if !has_mod && is_floating_win && event.detail == 1 {
+            let geometry = self.get_floating_geometry(window);
+            let edge = determine_resize_edge(&geometry, event.root_x, event.root_y);
+            tracing::debug!(
+                "Edge detection: geometry=({},{} {}x{}), edge={:?}",
+                geometry.x, geometry.y, geometry.width, geometry.height, edge
+            );
+            if edge != ResizeEdge::None {
+                tracing::info!("Starting edge resize for floating window {}, edge {:?}", window, edge);
+                self.drag_state = Some(DragState::Resize {
+                    window,
+                    start_x: event.root_x,
+                    start_y: event.root_y,
+                    start_geometry: geometry.clone(),
+                    edge,
+                });
+                tracing::debug!("Grabbing pointer for resize, geometry={:?}", geometry);
+                self.conn.grab_pointer(window)?;
+                self.conn.flush()?;
+                return Ok(());
+            }
+            // Not on edge - if this is a focused floating window, replay the click
+            if self.focused_window == Some(window) {
+                self.conn.conn.allow_events(
+                    x11rb::protocol::xproto::Allow::REPLAY_POINTER,
+                    x11rb::CURRENT_TIME,
+                )?;
+                self.conn.flush()?;
+                return Ok(());
+            }
+        }
+
         // Only handle if we manage this window
         if !self.windows.contains_key(&window) {
             return Ok(());
@@ -451,14 +514,21 @@ impl WindowManager {
 
         // Focus the clicked window
         if self.focused_window != Some(window) {
-            // Regrab button on old focused window
+            // Regrab button on old focused window (unless it's floating - keep grab for edge resize)
             if let Some(old) = self.focused_window {
-                self.conn.grab_button(old)?;
+                if !self.is_floating(old) {
+                    self.conn.grab_button(old)?;
+                }
             }
 
-            // Set focus and ungrab button on new focused window (no warp - mouse click)
+            // Set focus
             self.set_focus(window, false)?;
-            self.conn.ungrab_button(window)?;
+
+            // For non-floating windows, ungrab button for click-through
+            // For floating windows, keep grab for edge resize detection
+            if !self.is_floating(window) {
+                self.conn.ungrab_button(window)?;
+            }
 
             // Raise floating windows on focus
             if self.is_floating(window) {
@@ -476,7 +546,9 @@ impl WindowManager {
         Ok(())
     }
 
-    fn handle_button_release(&mut self, _event: ButtonReleaseEvent) -> Result<()> {
+    fn handle_button_release(&mut self, event: ButtonReleaseEvent) -> Result<()> {
+        tracing::debug!("ButtonRelease: button={}, window={}, in_drag={}",
+            event.detail, event.event, self.drag_state.is_some());
         if self.drag_state.is_some() {
             tracing::debug!("Ending drag operation");
             self.drag_state = None;
@@ -487,10 +559,24 @@ impl WindowManager {
     }
 
     fn handle_motion_notify(&mut self, event: MotionNotifyEvent) -> Result<()> {
-        let Some(ref drag) = self.drag_state else {
-            return Ok(());
-        };
+        // If not in a drag, check for edge cursor changes on floating windows
+        if self.drag_state.is_none() {
+            let window = event.event;
+            let is_managed = self.windows.contains_key(&window);
+            let is_float = is_managed && self.is_floating(window);
 
+            if is_float {
+                tracing::trace!(
+                    "Motion on floating window {}: root({},{}) event({},{})",
+                    window, event.root_x, event.root_y, event.event_x, event.event_y
+                );
+                self.update_edge_cursor(window, event.root_x, event.root_y)?;
+            }
+            return Ok(());
+        }
+
+        let drag = self.drag_state.as_ref().unwrap();
+        tracing::debug!("Motion during drag: root({},{}), drag_state={:?}", event.root_x, event.root_y, drag);
         match drag {
             DragState::Move {
                 window,
@@ -531,6 +617,53 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Handle pointer motion for edge cursor changes on floating windows.
+    fn update_edge_cursor(&mut self, window: u32, root_x: i16, root_y: i16) -> Result<()> {
+        if !self.is_floating(window) {
+            // Not a floating window, ensure cursor is normal
+            if self.current_edge_cursor.is_some() {
+                self.conn.set_window_cursor(window, self.conn.cursor_normal)?;
+                self.current_edge_cursor = None;
+            }
+            return Ok(());
+        }
+
+        let geometry = self.get_floating_geometry(window);
+        let edge = determine_resize_edge(&geometry, root_x, root_y);
+
+        // Check if we need to update the cursor
+        let current = self.current_edge_cursor;
+        if current.map(|(w, e)| (w, e)) == Some((window, edge)) {
+            return Ok(()); // No change needed
+        }
+
+        // Get the appropriate cursor for this edge
+        let cursor = match edge {
+            ResizeEdge::TopLeft => self.conn.cursor_top_left,
+            ResizeEdge::Top => self.conn.cursor_top,
+            ResizeEdge::TopRight => self.conn.cursor_top_right,
+            ResizeEdge::Left => self.conn.cursor_left,
+            ResizeEdge::Right => self.conn.cursor_right,
+            ResizeEdge::BottomLeft => self.conn.cursor_bottom_left,
+            ResizeEdge::Bottom => self.conn.cursor_bottom,
+            ResizeEdge::BottomRight => self.conn.cursor_bottom_right,
+            ResizeEdge::None => self.conn.cursor_normal,
+        };
+
+        // Set cursor on the window
+        self.conn.set_window_cursor(window, cursor)?;
+        self.conn.flush()?;
+
+        if edge != ResizeEdge::None {
+            tracing::debug!("Set resize cursor {:?} for floating window {} edge", edge, window);
+            self.current_edge_cursor = Some((window, edge));
+        } else {
+            self.current_edge_cursor = None;
+        }
+
+        Ok(())
+    }
+
     fn handle_enter_notify(&mut self, event: EnterNotifyEvent) -> Result<()> {
         let window = event.event;
 
@@ -563,14 +696,20 @@ impl WindowManager {
 
         tracing::debug!("Focus follows mouse: focusing window {}", window);
 
-        // Regrab button on old focused window
+        // Regrab button on old focused window (unless floating - keep for edge resize)
         if let Some(old) = self.focused_window {
-            self.conn.grab_button(old)?;
+            if !self.is_floating(old) {
+                self.conn.grab_button(old)?;
+            }
         }
 
         // Focus the new window (no warp - mouse enter)
         self.set_focus(window, false)?;
-        self.conn.ungrab_button(window)?;
+
+        // Ungrab button for click-through (unless floating - keep for edge resize)
+        if !self.is_floating(window) {
+            self.conn.ungrab_button(window)?;
+        }
 
         // Raise floating windows on focus
         if self.is_floating(window) {
@@ -968,11 +1107,17 @@ impl WindowManager {
             .or_else(|| self.workspaces[workspace_idx].floating.last().copied())
             .or_else(|| self.workspaces[workspace_idx].tree.first_window())
         {
+            // Regrab on old window (unless floating)
             if let Some(old) = self.focused_window {
-                self.conn.grab_button(old)?;
+                if !self.is_floating(old) {
+                    self.conn.grab_button(old)?;
+                }
             }
             self.set_focus(window, true)?;
-            self.conn.ungrab_button(window)?;
+            // Ungrab on new window (unless floating - keep for edge resize)
+            if !self.is_floating(window) {
+                self.conn.ungrab_button(window)?;
+            }
         } else {
             // No windows on target monitor - clear focus and warp to monitor center
             self.focused_window = None;
@@ -1646,11 +1791,17 @@ impl WindowManager {
             .or_else(|| self.workspaces[workspace_idx].floating.last().copied())
             .or_else(|| self.workspaces[workspace_idx].tree.first_window())
         {
+            // Regrab on old window (unless floating)
             if let Some(old) = self.focused_window {
-                self.conn.grab_button(old)?;
+                if !self.is_floating(old) {
+                    self.conn.grab_button(old)?;
+                }
             }
             self.set_focus(window, true)?;
-            self.conn.ungrab_button(window)?;
+            // Ungrab on new window (unless floating - keep for edge resize)
+            if !self.is_floating(window) {
+                self.conn.ungrab_button(window)?;
+            }
         } else {
             // No windows - warp to monitor center
             self.focused_window = None;
@@ -1761,14 +1912,16 @@ impl WindowManager {
 
         let next_window = floating[next_idx];
 
-        // Regrab button on old focused window
+        // Regrab button on old focused window (unless it's floating)
         if let Some(old) = self.focused_window {
-            self.conn.grab_button(old)?;
+            if !self.is_floating(old) {
+                self.conn.grab_button(old)?;
+            }
         }
 
         // Focus and raise the next floating window (keyboard action, warp pointer)
+        // Keep button grabbed on floating windows for edge resize
         self.set_focus(next_window, true)?;
-        self.conn.ungrab_button(next_window)?;
         self.raise_window(next_window)?;
 
         tracing::debug!("Cycled to floating window {} (idx {})", next_window, next_idx);
@@ -1798,6 +1951,21 @@ impl WindowManager {
             // Update window state
             if let Some(win) = self.windows.get_mut(&window) {
                 win.floating = false;
+            }
+
+            // Remove POINTER_MOTION event mask (no longer need edge detection)
+            self.conn.select_input(
+                window,
+                EventMask::ENTER_WINDOW
+                    | EventMask::FOCUS_CHANGE
+                    | EventMask::PROPERTY_CHANGE
+                    | EventMask::STRUCTURE_NOTIFY,
+            )?;
+
+            // Clear edge cursor state if this window had one
+            if self.current_edge_cursor.map(|(w, _)| w) == Some(window) {
+                self.conn.set_window_cursor(window, self.conn.cursor_normal)?;
+                self.current_edge_cursor = None;
             }
 
             // Remove from floating list
@@ -1841,6 +2009,20 @@ impl WindowManager {
                 win.floating = true;
                 win.floating_geometry = geometry;
             }
+
+            // Add POINTER_MOTION event mask for edge detection
+            self.conn.select_input(
+                window,
+                EventMask::ENTER_WINDOW
+                    | EventMask::FOCUS_CHANGE
+                    | EventMask::PROPERTY_CHANGE
+                    | EventMask::STRUCTURE_NOTIFY
+                    | EventMask::POINTER_MOTION,
+            )?;
+
+            // Re-establish button grabs for edge resize detection
+            // (buttons may have been ungrabbed when the window was focused as tiled)
+            self.conn.grab_button(window)?;
 
             // Add to floating list (on top)
             self.current_workspace_mut().add_floating(window);
@@ -2053,7 +2235,37 @@ fn parse_direction(s: &str) -> Option<Direction> {
     }
 }
 
+/// Threshold in pixels for detecting edge proximity
+const EDGE_THRESHOLD: i16 = 12;
+
+/// Determine which edge/corner of a window a point is near.
+/// Returns ResizeEdge::None if not near any edge.
 fn determine_resize_edge(geometry: &Rect, click_x: i16, click_y: i16) -> ResizeEdge {
+    let left = geometry.x;
+    let right = geometry.x + geometry.width as i16;
+    let top = geometry.y;
+    let bottom = geometry.y + geometry.height as i16;
+
+    let near_left = click_x >= left && click_x < left + EDGE_THRESHOLD;
+    let near_right = click_x > right - EDGE_THRESHOLD && click_x <= right;
+    let near_top = click_y >= top && click_y < top + EDGE_THRESHOLD;
+    let near_bottom = click_y > bottom - EDGE_THRESHOLD && click_y <= bottom;
+
+    match (near_left, near_right, near_top, near_bottom) {
+        (true, _, true, _) => ResizeEdge::TopLeft,
+        (_, true, true, _) => ResizeEdge::TopRight,
+        (true, _, _, true) => ResizeEdge::BottomLeft,
+        (_, true, _, true) => ResizeEdge::BottomRight,
+        (true, _, _, _) => ResizeEdge::Left,
+        (_, true, _, _) => ResizeEdge::Right,
+        (_, _, true, _) => ResizeEdge::Top,
+        (_, _, _, true) => ResizeEdge::Bottom,
+        _ => ResizeEdge::None,
+    }
+}
+
+/// Determine resize edge for mod+click (quadrant-based, always picks a corner)
+fn determine_resize_edge_quadrant(geometry: &Rect, click_x: i16, click_y: i16) -> ResizeEdge {
     let center_x = geometry.x + geometry.width as i16 / 2;
     let center_y = geometry.y + geometry.height as i16 / 2;
 
@@ -2082,19 +2294,36 @@ fn calculate_resize(geometry: &Rect, edge: ResizeEdge, dx: i16, dy: i16) -> (i16
             w = (w as i16 - dx).max(MIN_SIZE as i16) as u16;
             h = (h as i16 - dy).max(MIN_SIZE as i16) as u16;
         }
+        ResizeEdge::Top => {
+            y += dy;
+            h = (h as i16 - dy).max(MIN_SIZE as i16) as u16;
+        }
         ResizeEdge::TopRight => {
             y += dy;
             w = (w as i16 + dx).max(MIN_SIZE as i16) as u16;
             h = (h as i16 - dy).max(MIN_SIZE as i16) as u16;
+        }
+        ResizeEdge::Left => {
+            x += dx;
+            w = (w as i16 - dx).max(MIN_SIZE as i16) as u16;
+        }
+        ResizeEdge::Right => {
+            w = (w as i16 + dx).max(MIN_SIZE as i16) as u16;
         }
         ResizeEdge::BottomLeft => {
             x += dx;
             w = (w as i16 - dx).max(MIN_SIZE as i16) as u16;
             h = (h as i16 + dy).max(MIN_SIZE as i16) as u16;
         }
+        ResizeEdge::Bottom => {
+            h = (h as i16 + dy).max(MIN_SIZE as i16) as u16;
+        }
         ResizeEdge::BottomRight => {
             w = (w as i16 + dx).max(MIN_SIZE as i16) as u16;
             h = (h as i16 + dy).max(MIN_SIZE as i16) as u16;
+        }
+        ResizeEdge::None => {
+            // No resize
         }
     }
 

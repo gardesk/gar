@@ -83,6 +83,16 @@ pub struct Connection {
     // Struts (reserved screen areas for docks/panels)
     pub net_wm_strut: Atom,
     pub net_wm_strut_partial: Atom,
+    // Cursors for resize operations
+    pub cursor_normal: u32,
+    pub cursor_top_left: u32,
+    pub cursor_top_right: u32,
+    pub cursor_bottom_left: u32,
+    pub cursor_bottom_right: u32,
+    pub cursor_left: u32,
+    pub cursor_right: u32,
+    pub cursor_top: u32,
+    pub cursor_bottom: u32,
 }
 
 impl Connection {
@@ -142,6 +152,19 @@ impl Connection {
         let net_wm_strut = conn.intern_atom(false, b"_NET_WM_STRUT")?.reply()?.atom;
         let net_wm_strut_partial = conn.intern_atom(false, b"_NET_WM_STRUT_PARTIAL")?.reply()?.atom;
 
+        // Create cursors for pointer and resize operations
+        let (
+            cursor_normal,
+            cursor_top_left,
+            cursor_top_right,
+            cursor_bottom_left,
+            cursor_bottom_right,
+            cursor_left,
+            cursor_right,
+            cursor_top,
+            cursor_bottom,
+        ) = Self::create_cursors(&conn)?;
+
         tracing::info!(
             "Connected to X server, screen {}x{}",
             screen_width,
@@ -185,6 +208,15 @@ impl Connection {
             net_wm_bypass_compositor,
             net_wm_strut,
             net_wm_strut_partial,
+            cursor_normal,
+            cursor_top_left,
+            cursor_top_right,
+            cursor_bottom_left,
+            cursor_bottom_right,
+            cursor_left,
+            cursor_right,
+            cursor_top,
+            cursor_bottom,
         })
     }
 
@@ -193,10 +225,6 @@ impl Connection {
     }
 
     pub fn become_wm(&self) -> Result<(), Error> {
-        // Create a normal pointer cursor for the root window
-        // This prevents the ugly X cursor when no windows are focused
-        let cursor = self.create_cursor()?;
-
         // Set root window background to black, cursor, and subscribe to events
         // The background ensures old window pixels are cleared when windows close
         let change = ChangeWindowAttributesAux::new()
@@ -207,7 +235,7 @@ impl Connection {
                     | EventMask::PROPERTY_CHANGE,
             )
             .background_pixel(self.screen().black_pixel)
-            .cursor(cursor);
+            .cursor(self.cursor_normal);
 
         let result = self
             .conn
@@ -254,29 +282,55 @@ impl Connection {
         }
     }
 
-    /// Create a left pointer cursor from the cursor font.
-    fn create_cursor(&self) -> Result<u32, Error> {
+    /// Create all cursors used by the window manager.
+    fn create_cursors(conn: &RustConnection) -> Result<(u32, u32, u32, u32, u32, u32, u32, u32, u32), Error> {
         // Open the cursor font
-        let font: Font = self.conn.generate_id()?;
-        self.conn.open_font(font, b"cursor")?;
+        let font: Font = conn.generate_id()?;
+        conn.open_font(font, b"cursor")?;
 
-        // Create cursor from font glyphs
-        // left_ptr is glyph 68, its mask is glyph 69
-        let cursor = self.conn.generate_id()?;
-        self.conn.create_glyph_cursor(
-            cursor,
-            font,
-            font,
-            68,  // left_ptr glyph
-            69,  // mask glyph
-            0, 0, 0,           // foreground RGB (black)
-            0xFFFF, 0xFFFF, 0xFFFF,  // background RGB (white)
-        )?;
+        // Cursor glyph numbers from the cursor font:
+        // left_ptr = 68, top_left_corner = 134, top_right_corner = 136
+        // bottom_left_corner = 12, bottom_right_corner = 14
+        // left_side = 70, right_side = 96, top_side = 138, bottom_side = 16
 
-        // Close font (cursor keeps its own reference)
-        self.conn.close_font(font)?;
+        let create = |glyph: u16| -> Result<u32, Error> {
+            let cursor = conn.generate_id()?;
+            conn.create_glyph_cursor(
+                cursor,
+                font,
+                font,
+                glyph,
+                glyph + 1,
+                0, 0, 0,
+                0xFFFF, 0xFFFF, 0xFFFF,
+            )?;
+            Ok(cursor)
+        };
 
-        Ok(cursor)
+        let cursor_normal = create(68)?;       // left_ptr
+        let cursor_top_left = create(134)?;    // top_left_corner
+        let cursor_top_right = create(136)?;   // top_right_corner
+        let cursor_bottom_left = create(12)?;  // bottom_left_corner
+        let cursor_bottom_right = create(14)?; // bottom_right_corner
+        let cursor_left = create(70)?;         // left_side
+        let cursor_right = create(96)?;        // right_side
+        let cursor_top = create(138)?;         // top_side
+        let cursor_bottom = create(16)?;       // bottom_side
+
+        // Close font (cursors keep their own references)
+        conn.close_font(font)?;
+
+        Ok((
+            cursor_normal,
+            cursor_top_left,
+            cursor_top_right,
+            cursor_bottom_left,
+            cursor_bottom_right,
+            cursor_left,
+            cursor_right,
+            cursor_top,
+            cursor_bottom,
+        ))
     }
 
     /// Grab a key combination on the root window.
@@ -330,13 +384,15 @@ impl Connection {
         Ok(())
     }
 
-    /// Grab Alt+Button1 and Alt+Button3 on root for floating window move/resize.
+    /// Grab Mod+Button1 and Mod+Button3 on root for floating window move/resize.
+    /// Grabs both Alt (M1) and Super (M4) to support either mod key configuration.
     pub fn grab_mod_buttons(&self) -> Result<(), Error> {
         let numlock = ModMask::M2;
         let capslock = ModMask::LOCK;
 
-        // Grab Alt+Button1 (move) and Alt+Button3 (resize) with NumLock/CapsLock variants
+        // Grab both Alt (M1) and Super (M4) with Button1 (move) and Button3 (resize)
         for button in [ButtonIndex::M1, ButtonIndex::M3] {
+            // Alt variants
             for mods in [
                 ModMask::M1,
                 ModMask::M1 | numlock,
@@ -355,8 +411,34 @@ impl Connection {
                     mods,
                 )?;
             }
+            // Super variants
+            for mods in [
+                ModMask::M4,
+                ModMask::M4 | numlock,
+                ModMask::M4 | capslock,
+                ModMask::M4 | numlock | capslock,
+            ] {
+                self.conn.grab_button(
+                    false,
+                    self.root,
+                    EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::BUTTON_MOTION,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                    x11rb::NONE,
+                    x11rb::NONE,
+                    button,
+                    mods,
+                )?;
+            }
         }
-        tracing::debug!("Grabbed Alt+Button1/Button3 on root for floating move/resize");
+        tracing::debug!("Grabbed Mod+Button1/Button3 on root for floating move/resize");
+        Ok(())
+    }
+
+    /// Set the cursor for a window.
+    pub fn set_window_cursor(&self, window: Window, cursor: u32) -> Result<(), Error> {
+        let change = ChangeWindowAttributesAux::new().cursor(cursor);
+        self.conn.change_window_attributes(window, &change)?;
         Ok(())
     }
 
@@ -448,7 +530,7 @@ impl Connection {
 
     /// Grab the pointer for drag operations.
     pub fn grab_pointer(&self, _window: Window) -> Result<(), Error> {
-        self.conn.grab_pointer(
+        let reply = self.conn.grab_pointer(
             false,
             self.root,
             EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
@@ -457,7 +539,8 @@ impl Connection {
             x11rb::NONE,
             x11rb::NONE,
             CURRENT_TIME,
-        )?;
+        )?.reply()?;
+        tracing::debug!("grab_pointer result: {:?}", reply.status);
         Ok(())
     }
 

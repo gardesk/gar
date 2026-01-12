@@ -43,6 +43,8 @@ pub struct WindowManager {
     pub focus_history: Vec<XWindow>,
     /// Struts from dock windows (status bars) - maps window ID to strut
     pub dock_struts: HashMap<XWindow, Strut>,
+    /// Current edge being displayed (for cursor changes on floating window edges)
+    pub current_edge_cursor: Option<(XWindow, crate::x11::events::ResizeEdge)>,
 }
 
 impl WindowManager {
@@ -132,6 +134,7 @@ impl WindowManager {
             frames: FrameManager::new(),
             focus_history: Vec::new(),
             dock_struts: HashMap::new(),
+            current_edge_cursor: None,
         })
     }
 
@@ -495,7 +498,11 @@ impl WindowManager {
         self.current_workspace_mut().focused = Some(window);
 
         // Ungrab buttons on new focused window (allow clicks through)
-        let _ = self.conn.ungrab_button(window);
+        // But keep grabs on floating windows so we can detect edge resize clicks
+        let is_floating = self.windows.get(&window).map_or(false, |w| w.floating);
+        if !is_floating {
+            let _ = self.conn.ungrab_button(window);
+        }
 
         // Update focus history - move window to front
         self.focus_history.retain(|&w| w != window);
