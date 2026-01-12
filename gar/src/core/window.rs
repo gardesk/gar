@@ -10,8 +10,17 @@ pub struct Window {
     pub mapped: bool,
     pub focused: bool,
     pub floating: bool,
+    pub fullscreen: bool,
+    /// Saved geometry before entering fullscreen (for restore)
+    pub pre_fullscreen_geometry: Option<Rect>,
+    /// Was the window floating before entering fullscreen?
+    pub pre_fullscreen_floating: bool,
     pub urgent: bool,
     pub workspace: usize,
+    /// Frame window ID (if title bars are enabled, client is reparented into this)
+    pub frame: Option<XWindow>,
+    /// Window title (cached from _NET_WM_NAME or WM_NAME)
+    pub title: String,
 }
 
 impl Window {
@@ -22,8 +31,18 @@ impl Window {
             mapped: false,
             focused: false,
             floating: false,
+            fullscreen: false,
+            pre_fullscreen_geometry: None,
+            pre_fullscreen_floating: false,
             urgent: false,
             workspace,
+            frame: None,
+            title: String::new(),
         }
+    }
+
+    /// Get the window to configure (frame if present, otherwise client).
+    pub fn outer_window(&self) -> XWindow {
+        self.frame.unwrap_or(self.id)
     }
 }

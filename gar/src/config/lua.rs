@@ -22,6 +22,7 @@ pub enum Action {
     Reload,
     Exit,
     ToggleFloating,
+    ToggleFullscreen,
     CycleFloating,
     FocusMonitor(String),     // "next", "prev", or monitor name
     MoveToMonitor(String),    // "next", "prev", or monitor name
@@ -220,6 +221,15 @@ impl LuaConfig {
                         }
                     }
                 }
+                "border_color_urgent" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            if let Some(color) = parse_color(&str_val) {
+                                state.config.border_color_urgent = color;
+                            }
+                        }
+                    }
+                }
                 "gap_inner" => {
                     if let Value::Integer(v) = value {
                         state.config.gap_inner = v as u32;
@@ -228,6 +238,48 @@ impl LuaConfig {
                 "gap_outer" => {
                     if let Value::Integer(v) = value {
                         state.config.gap_outer = v as u32;
+                    }
+                }
+                "titlebar_enabled" => {
+                    if let Value::Boolean(v) = value {
+                        state.config.titlebar_enabled = v;
+                    }
+                }
+                "titlebar_height" => {
+                    if let Value::Integer(v) = value {
+                        state.config.titlebar_height = v as u32;
+                    }
+                }
+                "titlebar_color_focused" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            if let Some(color) = parse_color(&str_val) {
+                                state.config.titlebar_color_focused = color;
+                            }
+                        }
+                    }
+                }
+                "titlebar_color_unfocused" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            if let Some(color) = parse_color(&str_val) {
+                                state.config.titlebar_color_unfocused = color;
+                            }
+                        }
+                    }
+                }
+                "titlebar_text_color" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            if let Some(color) = parse_color(&str_val) {
+                                state.config.titlebar_text_color = color;
+                            }
+                        }
+                    }
+                }
+                "follow_window_on_move" => {
+                    if let Value::Boolean(v) = value {
+                        state.config.follow_window_on_move = v;
                     }
                 }
                 _ => {
@@ -271,6 +323,7 @@ impl LuaConfig {
                             "exit" => Action::Exit,
                             "equalize" => Action::Equalize,
                             "toggle_floating" => Action::ToggleFloating,
+                            "toggle_fullscreen" => Action::ToggleFullscreen,
                             "cycle_floating" => Action::CycleFloating,
                             "focus" => {
                                 let dir: String = t.get("direction").unwrap_or_default();
@@ -425,6 +478,11 @@ impl LuaConfig {
         let toggle_floating = self.lua.create_table()?;
         toggle_floating.set("action", "toggle_floating")?;
         gar.set("toggle_floating", toggle_floating)?;
+
+        // gar.toggle_fullscreen
+        let toggle_fullscreen = self.lua.create_table()?;
+        toggle_fullscreen.set("action", "toggle_fullscreen")?;
+        gar.set("toggle_fullscreen", toggle_fullscreen)?;
 
         // gar.cycle_floating
         let cycle_floating = self.lua.create_table()?;

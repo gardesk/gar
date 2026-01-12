@@ -10,6 +10,27 @@ use x11rb::CURRENT_TIME;
 
 use super::Error;
 
+/// Parsed WM_HINTS structure (ICCCM).
+#[derive(Debug, Clone, Default)]
+pub struct WmHints {
+    pub input: bool,
+    pub initial_state: Option<u32>,
+    pub urgent: bool,
+}
+
+/// Parsed WM_NORMAL_HINTS (size hints) structure (ICCCM).
+#[derive(Debug, Clone, Default)]
+pub struct SizeHints {
+    pub min_width: Option<u32>,
+    pub min_height: Option<u32>,
+    pub max_width: Option<u32>,
+    pub max_height: Option<u32>,
+    pub base_width: Option<u32>,
+    pub base_height: Option<u32>,
+    pub width_inc: Option<u32>,
+    pub height_inc: Option<u32>,
+}
+
 pub struct Connection {
     pub conn: RustConnection,
     pub screen_num: usize,
@@ -20,6 +41,8 @@ pub struct Connection {
     pub wm_protocols: Atom,
     pub wm_delete_window: Atom,
     pub wm_transient_for: Atom,
+    pub wm_hints: Atom,
+    pub wm_normal_hints: Atom,
     // EWMH atoms for window types
     pub net_wm_window_type: Atom,
     pub net_wm_window_type_dialog: Atom,
@@ -30,14 +53,22 @@ pub struct Connection {
     // EWMH atoms for window state
     pub net_wm_state: Atom,
     pub net_wm_state_modal: Atom,
+    pub net_wm_state_fullscreen: Atom,
     // EWMH atoms for workspaces
     pub net_supported: Atom,
+    pub net_supporting_wm_check: Atom,
+    pub net_client_list: Atom,
+    pub net_client_list_stacking: Atom,
+    pub net_close_window: Atom,
+    pub net_wm_name: Atom,
     pub net_number_of_desktops: Atom,
     pub net_current_desktop: Atom,
     pub net_desktop_names: Atom,
     pub net_wm_desktop: Atom,
     pub net_active_window: Atom,
     pub utf8_string: Atom,
+    // Compositor integration
+    pub net_wm_bypass_compositor: Atom,
 }
 
 impl Connection {
@@ -58,6 +89,8 @@ impl Connection {
         let wm_protocols = conn.intern_atom(false, b"WM_PROTOCOLS")?.reply()?.atom;
         let wm_delete_window = conn.intern_atom(false, b"WM_DELETE_WINDOW")?.reply()?.atom;
         let wm_transient_for = conn.intern_atom(false, b"WM_TRANSIENT_FOR")?.reply()?.atom;
+        let wm_hints = conn.intern_atom(false, b"WM_HINTS")?.reply()?.atom;
+        let wm_normal_hints = conn.intern_atom(false, b"WM_NORMAL_HINTS")?.reply()?.atom;
 
         // Intern EWMH atoms for window types
         let net_wm_window_type = conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE")?.reply()?.atom;
@@ -70,15 +103,24 @@ impl Connection {
         // Intern EWMH atoms for window state
         let net_wm_state = conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom;
         let net_wm_state_modal = conn.intern_atom(false, b"_NET_WM_STATE_MODAL")?.reply()?.atom;
+        let net_wm_state_fullscreen = conn.intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")?.reply()?.atom;
 
-        // Intern EWMH atoms for workspaces
+        // Intern EWMH atoms for workspaces and WM identification
         let net_supported = conn.intern_atom(false, b"_NET_SUPPORTED")?.reply()?.atom;
+        let net_supporting_wm_check = conn.intern_atom(false, b"_NET_SUPPORTING_WM_CHECK")?.reply()?.atom;
+        let net_client_list = conn.intern_atom(false, b"_NET_CLIENT_LIST")?.reply()?.atom;
+        let net_client_list_stacking = conn.intern_atom(false, b"_NET_CLIENT_LIST_STACKING")?.reply()?.atom;
+        let net_close_window = conn.intern_atom(false, b"_NET_CLOSE_WINDOW")?.reply()?.atom;
+        let net_wm_name = conn.intern_atom(false, b"_NET_WM_NAME")?.reply()?.atom;
         let net_number_of_desktops = conn.intern_atom(false, b"_NET_NUMBER_OF_DESKTOPS")?.reply()?.atom;
         let net_current_desktop = conn.intern_atom(false, b"_NET_CURRENT_DESKTOP")?.reply()?.atom;
         let net_desktop_names = conn.intern_atom(false, b"_NET_DESKTOP_NAMES")?.reply()?.atom;
         let net_wm_desktop = conn.intern_atom(false, b"_NET_WM_DESKTOP")?.reply()?.atom;
         let net_active_window = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
         let utf8_string = conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
+
+        // Compositor integration atom - apps can set this to request un-redirection for fullscreen
+        let net_wm_bypass_compositor = conn.intern_atom(false, b"_NET_WM_BYPASS_COMPOSITOR")?.reply()?.atom;
 
         tracing::info!(
             "Connected to X server, screen {}x{}",
@@ -95,6 +137,8 @@ impl Connection {
             wm_protocols,
             wm_delete_window,
             wm_transient_for,
+            wm_hints,
+            wm_normal_hints,
             net_wm_window_type,
             net_wm_window_type_dialog,
             net_wm_window_type_utility,
@@ -103,13 +147,20 @@ impl Connection {
             net_wm_window_type_notification,
             net_wm_state,
             net_wm_state_modal,
+            net_wm_state_fullscreen,
             net_supported,
+            net_supporting_wm_check,
+            net_client_list,
+            net_client_list_stacking,
+            net_close_window,
+            net_wm_name,
             net_number_of_desktops,
             net_current_desktop,
             net_desktop_names,
             net_wm_desktop,
             net_active_window,
             utf8_string,
+            net_wm_bypass_compositor,
         })
     }
 
@@ -263,6 +314,19 @@ impl Connection {
             0, 0,         // src_width, src_height (ignored)
             center_x,     // dst_x (relative to dst_window)
             center_y,     // dst_y (relative to dst_window)
+        )?;
+        Ok(())
+    }
+
+    /// Warp the mouse pointer to absolute screen coordinates.
+    pub fn warp_pointer(&self, x: i16, y: i16) -> Result<(), Error> {
+        self.conn.warp_pointer(
+            x11rb::NONE,  // src_window
+            self.root,    // dst_window (root for absolute coords)
+            0, 0,         // src_x, src_y
+            0, 0,         // src_width, src_height
+            x,            // dst_x
+            y,            // dst_y
         )?;
         Ok(())
     }
@@ -544,15 +608,137 @@ impl Connection {
         None
     }
 
+    /// Get WM_HINTS for a window (ICCCM).
+    /// Returns urgency flag and other hints.
+    pub fn get_wm_hints(&self, window: Window) -> Option<WmHints> {
+        let reply = self.conn.get_property(
+            false,
+            window,
+            self.wm_hints,
+            AtomEnum::ANY,
+            0,
+            9, // WM_HINTS has 9 32-bit values
+        ).ok()?.reply().ok()?;
+
+        if reply.format != 32 || reply.value.len() < 4 {
+            return None;
+        }
+
+        // Parse the 32-bit values
+        let values: Vec<u32> = reply.value
+            .chunks_exact(4)
+            .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+
+        if values.is_empty() {
+            return None;
+        }
+
+        let flags = values[0];
+
+        // Flag bits from ICCCM
+        const INPUT_HINT: u32 = 1 << 0;
+        const STATE_HINT: u32 = 1 << 1;
+        const URGENCY_HINT: u32 = 1 << 8; // XUrgencyHint
+
+        let mut hints = WmHints::default();
+
+        // Input hint (does window want keyboard focus?)
+        if flags & INPUT_HINT != 0 && values.len() > 1 {
+            hints.input = values[1] != 0;
+        } else {
+            hints.input = true; // Default to accepting input
+        }
+
+        // Initial state hint
+        if flags & STATE_HINT != 0 && values.len() > 2 {
+            hints.initial_state = Some(values[2]);
+        }
+
+        // Urgency hint
+        hints.urgent = flags & URGENCY_HINT != 0;
+
+        Some(hints)
+    }
+
+    /// Get WM_NORMAL_HINTS (size hints) for a window (ICCCM).
+    pub fn get_size_hints(&self, window: Window) -> Option<SizeHints> {
+        let reply = self.conn.get_property(
+            false,
+            window,
+            self.wm_normal_hints,
+            AtomEnum::ANY,
+            0,
+            18, // WM_SIZE_HINTS has up to 18 32-bit values
+        ).ok()?.reply().ok()?;
+
+        if reply.format != 32 || reply.value.len() < 4 {
+            return None;
+        }
+
+        // Parse the 32-bit values
+        let values: Vec<u32> = reply.value
+            .chunks_exact(4)
+            .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+
+        if values.is_empty() {
+            return None;
+        }
+
+        let flags = values[0];
+
+        // Flag bits from ICCCM (indices into the values array)
+        const P_MIN_SIZE: u32 = 1 << 4;    // min_width, min_height at [5], [6]
+        const P_MAX_SIZE: u32 = 1 << 5;    // max_width, max_height at [7], [8]
+        const P_RESIZE_INC: u32 = 1 << 6;  // width_inc, height_inc at [9], [10]
+        const P_BASE_SIZE: u32 = 1 << 8;   // base_width, base_height at [15], [16]
+
+        let mut hints = SizeHints::default();
+
+        // Min size (indices 5, 6)
+        if flags & P_MIN_SIZE != 0 && values.len() > 6 {
+            hints.min_width = Some(values[5]);
+            hints.min_height = Some(values[6]);
+        }
+
+        // Max size (indices 7, 8)
+        if flags & P_MAX_SIZE != 0 && values.len() > 8 {
+            hints.max_width = Some(values[7]);
+            hints.max_height = Some(values[8]);
+        }
+
+        // Resize increment (indices 9, 10)
+        if flags & P_RESIZE_INC != 0 && values.len() > 10 {
+            hints.width_inc = Some(values[9]);
+            hints.height_inc = Some(values[10]);
+        }
+
+        // Base size (indices 15, 16)
+        if flags & P_BASE_SIZE != 0 && values.len() > 16 {
+            hints.base_width = Some(values[15]);
+            hints.base_height = Some(values[16]);
+        }
+
+        Some(hints)
+    }
+
     /// Set _NET_SUPPORTED on root window to advertise supported EWMH atoms.
     pub fn set_ewmh_supported(&self) -> Result<(), Error> {
         let supported = [
             self.net_supported,
+            self.net_supporting_wm_check,
+            self.net_client_list,
+            self.net_client_list_stacking,
             self.net_number_of_desktops,
             self.net_current_desktop,
             self.net_desktop_names,
             self.net_wm_desktop,
             self.net_active_window,
+            self.net_close_window,
+            self.net_wm_state,
+            self.net_wm_state_fullscreen,
+            self.net_wm_name,
         ];
         self.conn.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
@@ -560,6 +746,79 @@ impl Connection {
             self.net_supported,
             AtomEnum::ATOM,
             &supported,
+        )?;
+        Ok(())
+    }
+
+    /// Setup _NET_SUPPORTING_WM_CHECK window and set _NET_WM_NAME.
+    /// Returns the check window ID for cleanup.
+    pub fn setup_wm_check(&self) -> Result<Window, Error> {
+        use x11rb::protocol::xproto::{CreateWindowAux, WindowClass, PropMode};
+
+        // Create a small off-screen window for WM identification
+        let check_window = self.conn.generate_id()?;
+        self.conn.create_window(
+            0, // depth: copy from parent
+            check_window,
+            self.root,
+            -1, -1, 1, 1, // x, y, width, height (off-screen)
+            0, // border_width
+            WindowClass::INPUT_OUTPUT,
+            0, // visual: copy from parent
+            &CreateWindowAux::new(),
+        )?;
+
+        // Set _NET_SUPPORTING_WM_CHECK on root window pointing to check window
+        self.conn.change_property32(
+            PropMode::REPLACE,
+            self.root,
+            self.net_supporting_wm_check,
+            AtomEnum::WINDOW,
+            &[check_window],
+        )?;
+
+        // Set _NET_SUPPORTING_WM_CHECK on check window pointing to itself
+        self.conn.change_property32(
+            PropMode::REPLACE,
+            check_window,
+            self.net_supporting_wm_check,
+            AtomEnum::WINDOW,
+            &[check_window],
+        )?;
+
+        // Set _NET_WM_NAME on check window to "gar"
+        self.conn.change_property8(
+            PropMode::REPLACE,
+            check_window,
+            self.net_wm_name,
+            self.utf8_string,
+            b"gar",
+        )?;
+
+        tracing::info!("Created WM check window {}", check_window);
+        Ok(check_window)
+    }
+
+    /// Update _NET_CLIENT_LIST on root window with all managed windows.
+    pub fn update_client_list(&self, windows: &[Window]) -> Result<(), Error> {
+        self.conn.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.net_client_list,
+            AtomEnum::WINDOW,
+            windows,
+        )?;
+        Ok(())
+    }
+
+    /// Update _NET_CLIENT_LIST_STACKING on root window with windows in stacking order.
+    pub fn update_client_list_stacking(&self, windows: &[Window]) -> Result<(), Error> {
+        self.conn.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.net_client_list_stacking,
+            AtomEnum::WINDOW,
+            windows,
         )?;
         Ok(())
     }
@@ -627,6 +886,18 @@ impl Connection {
             self.net_wm_desktop,
             AtomEnum::CARDINAL,
             &[desktop],
+        )?;
+        Ok(())
+    }
+
+    /// Set _NET_WM_STATE on a window with the specified state atoms.
+    pub fn set_window_state(&self, window: Window, states: &[Atom]) -> Result<(), Error> {
+        self.conn.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.net_wm_state,
+            AtomEnum::ATOM,
+            states,
         )?;
         Ok(())
     }

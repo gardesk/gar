@@ -2,9 +2,10 @@ use std::process::Command;
 
 use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::xproto::{
-    ButtonPressEvent, ButtonReleaseEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt,
-    DestroyNotifyEvent, EnterNotifyEvent, EventMask, KeyPressEvent, MapRequestEvent, ModMask,
-    MotionNotifyEvent, NotifyMode, StackMode, UnmapNotifyEvent,
+    ButtonPressEvent, ButtonReleaseEvent, ClientMessageEvent, ConfigureRequestEvent,
+    ConfigureWindowAux, ConnectionExt, DestroyNotifyEvent, EnterNotifyEvent, EventMask,
+    ExposeEvent, KeyPressEvent, MapRequestEvent, ModMask, MotionNotifyEvent, NotifyMode,
+    PropertyNotifyEvent, StackMode, UnmapNotifyEvent,
 };
 use x11rb::protocol::Event;
 
@@ -66,6 +67,13 @@ impl WindowManager {
     pub fn setup_ewmh_hints(&self) -> Result<()> {
         // Advertise supported EWMH atoms
         self.conn.set_ewmh_supported()?;
+
+        // Create WM check window for EWMH identification
+        self.conn.setup_wm_check()?;
+
+        // Initialize empty client lists
+        self.conn.update_client_list(&[])?;
+        self.conn.update_client_list_stacking(&[])?;
 
         // Set number of desktops
         let num_desktops = self.workspaces.len() as u32;
@@ -175,6 +183,15 @@ impl WindowManager {
                 tracing::info!("RandR notify event, refreshing monitors");
                 self.refresh_monitors()?;
             }
+            Event::ClientMessage(e) => {
+                self.handle_client_message(e)?;
+            }
+            Event::PropertyNotify(e) => {
+                self.handle_property_notify(e)?;
+            }
+            Event::Expose(e) => {
+                self.handle_expose(e)?;
+            }
             _ => {
                 tracing::trace!("Unhandled event: {:?}", event);
             }
@@ -224,6 +241,8 @@ impl WindowManager {
             } else {
                 self.manage_window_on_workspace(window, target_idx);
             }
+            // Create frame if title bars enabled
+            self.create_frame_for_window(window);
             // Don't map - it's on another workspace
         } else {
             // Window goes to current workspace
@@ -232,7 +251,13 @@ impl WindowManager {
             } else {
                 self.manage_window(window);
             }
-            // Map the window
+            // Create frame if title bars enabled
+            let frame = self.create_frame_for_window(window);
+
+            // Map the window (and frame if present)
+            if frame.is_some() {
+                self.frames.map_frame(&self.conn.conn, window)?;
+            }
             self.conn.map_window(window)?;
         }
 
@@ -502,6 +527,169 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Handle EWMH client message requests (focus, workspace switch, close, state changes).
+    fn handle_client_message(&mut self, event: ClientMessageEvent) -> Result<()> {
+        let msg_type = event.type_;
+        let window = event.window;
+
+        if msg_type == self.conn.net_active_window {
+            // Application requesting focus
+            tracing::debug!("ClientMessage: _NET_ACTIVE_WINDOW for window {}", window);
+
+            if self.windows.contains_key(&window) {
+                // Get the window's workspace and switch to it if needed
+                if let Some(win) = self.windows.get(&window) {
+                    let ws_idx = win.workspace;
+                    if ws_idx != self.focused_workspace {
+                        self.switch_workspace(ws_idx)?;
+                    }
+                }
+                // Focus the window
+                if let Some(old) = self.focused_window {
+                    self.conn.grab_button(old)?;
+                }
+                self.set_focus(window)?;
+                self.conn.ungrab_button(window)?;
+                if self.is_floating(window) {
+                    self.raise_window(window)?;
+                }
+            }
+        } else if msg_type == self.conn.net_current_desktop {
+            // Workspace switch request (from pagers, etc.)
+            let desktop = event.data.as_data32()[0] as usize;
+            tracing::debug!("ClientMessage: _NET_CURRENT_DESKTOP to {}", desktop);
+
+            if desktop < self.workspaces.len() {
+                self.switch_workspace(desktop)?;
+            }
+        } else if msg_type == self.conn.net_close_window {
+            // Close window request
+            tracing::debug!("ClientMessage: _NET_CLOSE_WINDOW for window {}", window);
+
+            if self.windows.contains_key(&window) {
+                self.close_window(window)?;
+            }
+        } else if msg_type == self.conn.net_wm_state {
+            // Window state change request (fullscreen, etc.)
+            let action = event.data.as_data32()[0];
+            let property = event.data.as_data32()[1];
+            tracing::debug!(
+                "ClientMessage: _NET_WM_STATE action={} property={} for window {}",
+                action, property, window
+            );
+
+            // Handle fullscreen state changes
+            if property == self.conn.net_wm_state_fullscreen {
+                // action: 0 = remove, 1 = add, 2 = toggle
+                match action {
+                    0 => {
+                        // Remove fullscreen
+                        self.set_fullscreen(window, false)?;
+                    }
+                    1 => {
+                        // Add fullscreen
+                        self.set_fullscreen(window, true)?;
+                    }
+                    2 => {
+                        // Toggle fullscreen
+                        self.toggle_fullscreen(window)?;
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            tracing::trace!("Unhandled ClientMessage type: {}", msg_type);
+        }
+
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Handle PropertyNotify events (urgency hints, etc.).
+    fn handle_property_notify(&mut self, event: PropertyNotifyEvent) -> Result<()> {
+        let window = event.window;
+        let atom = event.atom;
+
+        // Check if WM_HINTS changed (urgency flag may have changed)
+        if atom == self.conn.wm_hints {
+            // Only handle for managed windows
+            if !self.windows.contains_key(&window) {
+                return Ok(());
+            }
+
+            tracing::debug!("WM_HINTS changed for window {}", window);
+
+            // Get the current WM_HINTS
+            if let Some(hints) = self.conn.get_wm_hints(window) {
+                let old_urgent = self.windows.get(&window).map(|w| w.urgent).unwrap_or(false);
+                let new_urgent = hints.urgent;
+
+                if old_urgent != new_urgent {
+                    tracing::info!(
+                        "Window {} urgency changed: {} -> {}",
+                        window, old_urgent, new_urgent
+                    );
+
+                    // Update window state
+                    if let Some(win) = self.windows.get_mut(&window) {
+                        win.urgent = new_urgent;
+                    }
+
+                    // Update border colors
+                    self.update_borders()?;
+                    self.conn.flush()?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle Expose events to redraw title bars.
+    fn handle_expose(&mut self, event: ExposeEvent) -> Result<()> {
+        let window = event.window;
+
+        // Only process when count is 0 (last expose in batch)
+        if event.count != 0 {
+            return Ok(());
+        }
+
+        // Check if this is a frame window
+        if let Some(client) = self.frames.client_for_frame(window) {
+            // Redraw the title bar
+            if self.config.titlebar_enabled {
+                let win_state = self.windows.get(&client);
+                let title = win_state.map(|w| w.title.as_str()).unwrap_or("");
+                let focused = self.focused_window == Some(client);
+
+                let bg_color = if focused {
+                    self.config.titlebar_color_focused
+                } else {
+                    self.config.titlebar_color_unfocused
+                };
+
+                // Get frame width from expose event
+                let width = event.width;
+                let titlebar_height = self.config.titlebar_height as u16;
+
+                self.frames.draw_titlebar(
+                    &self.conn.conn,
+                    client,
+                    title,
+                    width,
+                    titlebar_height,
+                    bg_color,
+                    self.config.titlebar_text_color,
+                    focused,
+                )?;
+
+                self.conn.flush()?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn handle_key_press(&mut self, event: KeyPressEvent) -> Result<()> {
         let keycode = event.detail;
         let state = event.state;
@@ -589,6 +777,11 @@ impl WindowManager {
             Action::ToggleFloating => {
                 if let Some(window) = self.focused_window {
                     self.toggle_floating(window)?;
+                }
+            }
+            Action::ToggleFullscreen => {
+                if let Some(window) = self.focused_window {
+                    self.toggle_fullscreen(window)?;
                 }
             }
             Action::CycleFloating => {
@@ -766,60 +959,106 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Switch to workspace using i3-style behavior:
+    /// - If workspace is visible on another monitor, focus moves to that monitor
+    /// - If workspace is not visible, it appears on the current monitor
     fn switch_workspace(&mut self, idx: usize) -> Result<()> {
         if idx >= self.workspaces.len() {
             return Ok(());
         }
 
-        // Find which monitor owns this workspace
-        let target_monitor_idx = self.monitor_idx_for_workspace(idx).unwrap_or(0);
-        let old_ws_on_target = self.monitors[target_monitor_idx].active_workspace;
+        // Check if workspace is already visible on some monitor
+        let visible_on_monitor = self.monitors.iter().position(|m| m.active_workspace == idx);
 
-        // Already on this workspace?
-        if idx == old_ws_on_target && target_monitor_idx == self.focused_monitor {
-            return Ok(());
-        }
+        if let Some(monitor_idx) = visible_on_monitor {
+            // Workspace is already visible - just focus that monitor (i3 behavior)
+            if monitor_idx == self.focused_monitor {
+                // Already on this workspace on this monitor
+                return Ok(());
+            }
 
-        tracing::info!(
-            "Switching to workspace {} on monitor {} (was ws {})",
-            idx + 1, target_monitor_idx, old_ws_on_target + 1
-        );
+            tracing::info!(
+                "Workspace {} already visible on monitor {}, focusing it",
+                idx + 1, monitor_idx
+            );
 
-        // If switching to a different workspace on the target monitor, hide old/show new
-        if idx != old_ws_on_target {
+            // Focus the monitor that has this workspace
+            self.focused_monitor = monitor_idx;
+            self.focused_workspace = idx;
+
+            // Update EWMH
+            self.conn.set_current_desktop(idx as u32)?;
+
+            // Warp pointer to that monitor
+            let monitor_geom = self.monitors[monitor_idx].geometry;
+            let center_x = monitor_geom.x + (monitor_geom.width as i16 / 2);
+            let center_y = monitor_geom.y + (monitor_geom.height as i16 / 2);
+            self.conn.warp_pointer(center_x, center_y)?;
+            self.last_warp = std::time::Instant::now();
+
+            // Focus a window on that workspace
+            if let Some(window) = self.workspaces[idx].focused
+                .or_else(|| self.workspaces[idx].floating.last().copied())
+                .or_else(|| self.workspaces[idx].tree.first_window())
+            {
+                self.set_focus(window)?;
+            } else {
+                self.focused_window = None;
+                self.conn.set_active_window(None)?;
+            }
+        } else {
+            // Workspace not visible - show it on current monitor (i3 behavior)
+            let current_monitor = self.focused_monitor;
+            let old_ws = self.monitors[current_monitor].active_workspace;
+
+            tracing::info!(
+                "Switching monitor {} from workspace {} to {}",
+                current_monitor, old_ws + 1, idx + 1
+            );
+
             // Hide windows on old workspace
-            for window in self.workspaces[old_ws_on_target].all_windows() {
+            for window in self.workspaces[old_ws].all_windows() {
                 self.conn.unmap_window(window)?;
+                // Also unmap frames if present
+                if let Some(frame) = self.frames.frame_for_client(window) {
+                    self.conn.unmap_window(frame)?;
+                }
             }
 
             // Update monitor's active workspace
-            self.monitors[target_monitor_idx].active_workspace = idx;
+            self.monitors[current_monitor].active_workspace = idx;
+            self.focused_workspace = idx;
+
+            // Update EWMH
+            self.conn.set_current_desktop(idx as u32)?;
 
             // Show windows on new workspace
             for window in self.workspaces[idx].all_windows() {
+                if let Some(frame) = self.frames.frame_for_client(window) {
+                    self.conn.map_window(frame)?;
+                }
                 self.conn.map_window(window)?;
             }
-        }
 
-        // Update focused state
-        self.focused_monitor = target_monitor_idx;
-        self.focused_workspace = idx;
+            // Apply layout
+            self.apply_layout()?;
 
-        // Update EWMH _NET_CURRENT_DESKTOP
-        self.conn.set_current_desktop(idx as u32)?;
-
-        // Apply layout
-        self.apply_layout()?;
-
-        // Focus a window on the target workspace
-        if let Some(window) = self.workspaces[idx].focused
-            .or_else(|| self.workspaces[idx].floating.last().copied())
-            .or_else(|| self.workspaces[idx].tree.first_window())
-        {
-            self.set_focus(window)?;
-            self.conn.ungrab_button(window)?;
-        } else {
-            self.focused_window = None;
+            // Focus a window on the new workspace
+            if let Some(window) = self.workspaces[idx].focused
+                .or_else(|| self.workspaces[idx].floating.last().copied())
+                .or_else(|| self.workspaces[idx].tree.first_window())
+            {
+                self.set_focus(window)?;
+            } else {
+                // No windows - warp to center of monitor
+                self.focused_window = None;
+                self.conn.set_active_window(None)?;
+                let monitor_geom = self.monitors[current_monitor].geometry;
+                let center_x = monitor_geom.x + (monitor_geom.width as i16 / 2);
+                let center_y = monitor_geom.y + (monitor_geom.height as i16 / 2);
+                self.conn.warp_pointer(center_x, center_y)?;
+                self.last_warp = std::time::Instant::now();
+            }
         }
 
         self.conn.flush()?;
@@ -827,7 +1066,7 @@ impl WindowManager {
     }
 
     fn move_to_workspace(&mut self, idx: usize) -> Result<()> {
-        if idx >= self.workspaces.len() || idx == self.focused_workspace {
+        if idx >= self.workspaces.len() {
             return Ok(());
         }
 
@@ -835,21 +1074,30 @@ impl WindowManager {
             return Ok(());
         };
 
+        // Get current workspace for this window
+        let current_ws = self.windows.get(&window).map(|w| w.workspace).unwrap_or(self.focused_workspace);
+
+        // Don't move if already on target workspace
+        if idx == current_ws {
+            return Ok(());
+        }
+
         let is_floating = self.windows.get(&window).map(|w| w.floating).unwrap_or(false);
 
-        tracing::info!("Moving window {} to workspace {} (floating: {})", window, idx + 1, is_floating);
+        tracing::info!("Moving window {} from workspace {} to {} (floating: {})",
+            window, current_ws + 1, idx + 1, is_floating);
 
         // Remove from current workspace (tree or floating list)
         if is_floating {
-            self.current_workspace_mut().remove_floating(window);
+            self.workspaces[current_ws].remove_floating(window);
         } else {
-            self.current_workspace_mut().tree.remove(window);
+            self.workspaces[current_ws].tree.remove(window);
         }
 
         // Update focus on current workspace
-        self.focused_window = self.current_workspace().tree.first_window()
-            .or_else(|| self.current_workspace().floating.last().copied());
-        self.current_workspace_mut().focused = self.focused_window;
+        let new_focus_on_current = self.workspaces[current_ws].tree.first_window()
+            .or_else(|| self.workspaces[current_ws].floating.last().copied());
+        self.workspaces[current_ws].focused = new_focus_on_current;
 
         // Update window's workspace tracking
         if let Some(win) = self.windows.get_mut(&window) {
@@ -859,27 +1107,57 @@ impl WindowManager {
         // Update EWMH _NET_WM_DESKTOP
         self.conn.set_window_desktop(window, idx as u32)?;
 
-        // Hide the window (it's moving to another workspace)
-        self.conn.unmap_window(window)?;
+        // Check if target workspace is visible on any monitor
+        let target_visible_on = self.monitors.iter().position(|m| m.active_workspace == idx);
 
-        // Insert into target workspace (use target monitor's geometry)
+        // Insert into target workspace
         if is_floating {
             self.workspaces[idx].add_floating(window);
         } else {
             let target_focused = self.workspaces[idx].focused;
-            let screen = self.workspace_rect(idx);
+            // Use target monitor's geometry if visible, otherwise use current monitor's
+            let screen = if let Some(mon_idx) = target_visible_on {
+                self.monitors[mon_idx].geometry
+            } else {
+                self.monitors[self.focused_monitor].geometry
+            };
             self.workspaces[idx]
                 .tree
                 .insert_with_rect(window, target_focused, screen);
         }
 
-        // Re-apply layout on current workspace
+        // If target workspace is visible, map the window; otherwise hide it
+        if target_visible_on.is_some() {
+            // Target is visible - map the window
+            if let Some(frame) = self.frames.frame_for_client(window) {
+                self.conn.map_window(frame)?;
+            }
+            self.conn.map_window(window)?;
+        } else {
+            // Target is not visible - hide the window
+            self.conn.unmap_window(window)?;
+            if let Some(frame) = self.frames.frame_for_client(window) {
+                self.conn.unmap_window(frame)?;
+            }
+        }
+
+        // Re-apply layout
         self.apply_layout()?;
 
-        // Update focus
-        if let Some(new_focus) = self.focused_window {
-            self.set_focus(new_focus)?;
-            self.conn.ungrab_button(new_focus)?;
+        // Check if we should follow the window to the target workspace
+        if self.config.follow_window_on_move {
+            // Switch to target workspace (this will focus the moved window)
+            self.switch_workspace(idx)?;
+        } else {
+            // Stay on current workspace, update focus to next window
+            if current_ws == self.focused_workspace {
+                self.focused_window = new_focus_on_current;
+                if let Some(new_focus) = self.focused_window {
+                    self.set_focus(new_focus)?;
+                } else {
+                    self.conn.set_active_window(None)?;
+                }
+            }
         }
 
         self.conn.flush()?;

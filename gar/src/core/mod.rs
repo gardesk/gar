@@ -16,6 +16,7 @@ use crate::config::{Config, LuaConfig, LuaState, RuleActions, WindowMatch};
 use crate::ipc::IpcServer;
 use crate::x11::Connection;
 use crate::x11::events::DragState;
+use crate::x11::FrameManager;
 use crate::Result;
 
 pub struct WindowManager {
@@ -34,6 +35,8 @@ pub struct WindowManager {
     pub ipc_server: Option<IpcServer>,
     /// Timestamp of last pointer warp - used to suppress EnterNotify feedback loop
     pub last_warp: std::time::Instant,
+    /// Frame manager for title bars
+    pub frames: FrameManager,
 }
 
 impl WindowManager {
@@ -87,16 +90,12 @@ impl WindowManager {
             ));
         }
 
-        // Assign workspaces to monitors
-        let ws_count = workspaces.len();
-        let mon_count = monitors.len();
+        // i3-style: each monitor starts with one workspace (1, 2, 3...)
+        // Any workspace can be moved to any monitor dynamically
         for (i, monitor) in monitors.iter_mut().enumerate() {
-            // Distribute workspaces: first monitor gets ws 1-N/M, etc.
-            let start = i * ws_count / mon_count;
-            let end = (i + 1) * ws_count / mon_count;
-            monitor.workspaces = (start..end).collect();
-            monitor.active_workspace = start;
-            tracing::debug!("Monitor '{}' assigned workspaces {:?}", monitor.name, monitor.workspaces);
+            monitor.workspaces = vec![i]; // Just track initial workspace
+            monitor.active_workspace = i; // Monitor 0 shows ws 0, monitor 1 shows ws 1, etc.
+            tracing::debug!("Monitor '{}' starts with workspace {}", monitor.name, i + 1);
         }
 
         Ok(Self {
@@ -114,6 +113,7 @@ impl WindowManager {
             drag_state: None,
             ipc_server,
             last_warp: std::time::Instant::now(),
+            frames: FrameManager::new(),
         })
     }
 
@@ -141,14 +141,14 @@ impl WindowManager {
             .unwrap_or_else(|| Rect::new(0, 0, self.conn.screen_width, self.conn.screen_height))
     }
 
-    /// Find which monitor a workspace belongs to.
+    /// Find which monitor is currently displaying a workspace (i3-style).
     pub fn monitor_for_workspace(&self, workspace_idx: usize) -> Option<&Monitor> {
-        self.monitors.iter().find(|m| m.workspaces.contains(&workspace_idx))
+        self.monitors.iter().find(|m| m.active_workspace == workspace_idx)
     }
 
-    /// Find the monitor index for a workspace.
+    /// Find the monitor index currently displaying a workspace (i3-style).
     pub fn monitor_idx_for_workspace(&self, workspace_idx: usize) -> Option<usize> {
-        self.monitors.iter().position(|m| m.workspaces.contains(&workspace_idx))
+        self.monitors.iter().position(|m| m.active_workspace == workspace_idx)
     }
 
     /// Refresh monitors (called on RandR screen change).
@@ -168,15 +168,27 @@ impl WindowManager {
             ));
         }
 
-        // Reassign workspaces to monitors
-        let ws_count = self.workspaces.len();
-        let mon_count = new_monitors.len();
+        // Try to preserve workspace assignments from old monitors
+        // If we have more monitors now, new ones get next available workspaces
+        let old_mon_count = self.monitors.len();
+        let mut used_workspaces: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
         for (i, monitor) in new_monitors.iter_mut().enumerate() {
-            let start = i * ws_count / mon_count;
-            let end = (i + 1) * ws_count / mon_count;
-            monitor.workspaces = (start..end).collect();
-            monitor.active_workspace = start;
-            tracing::info!("Monitor '{}' assigned workspaces {:?}", monitor.name, monitor.workspaces);
+            if i < old_mon_count {
+                // Preserve old monitor's workspace
+                monitor.active_workspace = self.monitors[i].active_workspace;
+                monitor.workspaces = vec![monitor.active_workspace];
+                used_workspaces.insert(monitor.active_workspace);
+            } else {
+                // New monitor - assign first unused workspace
+                let first_free = (0..self.workspaces.len())
+                    .find(|ws| !used_workspaces.contains(ws))
+                    .unwrap_or(0);
+                monitor.active_workspace = first_free;
+                monitor.workspaces = vec![first_free];
+                used_workspaces.insert(first_free);
+            }
+            tracing::info!("Monitor '{}' showing workspace {}", monitor.name, monitor.active_workspace + 1);
         }
 
         self.monitors = new_monitors;
@@ -186,10 +198,8 @@ impl WindowManager {
             self.focused_monitor = 0;
         }
 
-        // Ensure focused_workspace is on the focused monitor
-        if !self.monitors[self.focused_monitor].workspaces.contains(&self.focused_workspace) {
-            self.focused_workspace = self.monitors[self.focused_monitor].active_workspace;
-        }
+        // Update focused_workspace to match the focused monitor
+        self.focused_workspace = self.monitors[self.focused_monitor].active_workspace;
 
         // Re-apply layout for visible workspaces
         self.apply_layout()?;
@@ -233,6 +243,9 @@ impl WindowManager {
             .insert_with_rect(window, focused, screen);
         self.current_workspace_mut().focused = Some(window);
         self.focused_window = Some(window);
+
+        // Update EWMH client lists
+        self.update_client_lists();
     }
 
     /// Add a window to management on a specific workspace.
@@ -254,6 +267,9 @@ impl WindowManager {
         let focused = self.workspaces[workspace_idx].focused;
         let screen = self.screen_rect();
         self.workspaces[workspace_idx].tree.insert_with_rect(window, focused, screen);
+
+        // Update EWMH client lists
+        self.update_client_lists();
     }
 
     /// Add a window to management as a floating window on a specific workspace.
@@ -282,6 +298,9 @@ impl WindowManager {
 
         // Add to target workspace's floating list
         self.workspaces[workspace_idx].add_floating(window);
+
+        // Update EWMH client lists
+        self.update_client_lists();
     }
 
     /// Add a window to management as a floating window.
@@ -312,6 +331,50 @@ impl WindowManager {
         self.current_workspace_mut().add_floating(window);
         self.current_workspace_mut().focused = Some(window);
         self.focused_window = Some(window);
+
+        // Update EWMH client lists
+        self.update_client_lists();
+    }
+
+    /// Create a frame for a window if title bars are enabled.
+    /// Returns the frame window ID if created.
+    pub fn create_frame_for_window(&mut self, window: XWindow) -> Option<XWindow> {
+        if !self.config.titlebar_enabled {
+            return None;
+        }
+
+        // Get window title for display
+        let title = self.conn.get_window_title(window).unwrap_or_default();
+
+        // Create frame with initial geometry (will be updated by apply_layout)
+        let screen = self.screen_rect();
+        let frame = match self.frames.create_frame(
+            &self.conn.conn,
+            self.conn.root,
+            window,
+            screen.x,
+            screen.y,
+            400, // Initial width, will be adjusted
+            300, // Initial height, will be adjusted
+            self.config.titlebar_height as u16,
+            self.config.border_width as u16,
+            self.config.border_color_unfocused,
+            self.config.titlebar_color_unfocused,
+        ) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!("Failed to create frame for window {}: {}", window, e);
+                return None;
+            }
+        };
+
+        // Update window state with frame and title
+        if let Some(win) = self.windows.get_mut(&window) {
+            win.frame = Some(frame);
+            win.title = title;
+        }
+
+        Some(frame)
     }
 
     /// Remove a window from management.
@@ -319,6 +382,13 @@ impl WindowManager {
         if let Some(win) = self.windows.remove(&window) {
             let ws_idx = win.workspace;
             tracing::info!("Unmanaging window {} from workspace {}", window, ws_idx + 1);
+
+            // Destroy frame if it exists
+            if win.frame.is_some() {
+                if let Err(e) = self.frames.destroy_frame(&self.conn.conn, self.conn.root, window) {
+                    tracing::warn!("Failed to destroy frame for window {}: {}", window, e);
+                }
+            }
 
             // Remove from the window's actual workspace (not current_workspace!)
             if win.floating {
@@ -334,6 +404,22 @@ impl WindowManager {
                     .or_else(|| self.workspaces[ws_idx].floating.last().copied());
                 self.workspaces[ws_idx].focused = self.focused_window;
             }
+
+            // Update EWMH client lists
+            self.update_client_lists();
+        }
+    }
+
+    /// Update _NET_CLIENT_LIST and _NET_CLIENT_LIST_STACKING on root window.
+    pub fn update_client_lists(&self) {
+        let windows: Vec<u32> = self.windows.keys().copied().collect();
+        if let Err(e) = self.conn.update_client_list(&windows) {
+            tracing::warn!("Failed to update client list: {}", e);
+        }
+        // For stacking order, we use the same list for now (tiling WM doesn't have true stacking)
+        // A more sophisticated implementation would order by focus history
+        if let Err(e) = self.conn.update_client_list_stacking(&windows) {
+            tracing::warn!("Failed to update client list stacking: {}", e);
         }
     }
 
@@ -371,6 +457,15 @@ impl WindowManager {
     pub fn set_focus(&mut self, window: XWindow) -> Result<()> {
         self.focused_window = Some(window);
         self.current_workspace_mut().focused = Some(window);
+
+        // Clear urgency when window receives focus
+        if let Some(win) = self.windows.get_mut(&window) {
+            if win.urgent {
+                tracing::debug!("Clearing urgency for window {} on focus", window);
+                win.urgent = false;
+            }
+        }
+
         self.conn.set_focus(window)?;
         self.conn.set_active_window(Some(window))?;
         self.update_borders()?;
@@ -382,6 +477,69 @@ impl WindowManager {
         // Record warp time to suppress EnterNotify feedback loop
         self.last_warp = std::time::Instant::now();
 
+        Ok(())
+    }
+
+    /// Toggle fullscreen state for a window.
+    pub fn toggle_fullscreen(&mut self, window: XWindow) -> Result<()> {
+        let win = match self.windows.get_mut(&window) {
+            Some(w) => w,
+            None => return Ok(()),
+        };
+
+        let ws_idx = win.workspace;
+
+        if win.fullscreen {
+            // Exit fullscreen - restore previous state
+            tracing::info!("Window {} exiting fullscreen", window);
+
+            win.fullscreen = false;
+
+            // Restore previous floating state
+            let was_floating = win.pre_fullscreen_floating;
+            if was_floating != win.floating {
+                if was_floating {
+                    // Was floating before - remove from tree, add to floating
+                    self.workspaces[ws_idx].tree.remove(window);
+                    self.workspaces[ws_idx].add_floating(window);
+                } else {
+                    // Was tiled before - remove from floating, add to tree
+                    self.workspaces[ws_idx].remove_floating(window);
+                    let focused = self.workspaces[ws_idx].focused;
+                    let screen = self.screen_rect();
+                    self.workspaces[ws_idx].tree.insert_with_rect(window, focused, screen);
+                }
+                if let Some(w) = self.windows.get_mut(&window) {
+                    w.floating = was_floating;
+                }
+            }
+
+            // Clear EWMH fullscreen state
+            let _ = self.conn.set_window_state(window, &[]);
+        } else {
+            // Enter fullscreen
+            tracing::info!("Window {} entering fullscreen", window);
+
+            // Save current state
+            win.pre_fullscreen_floating = win.floating;
+            win.fullscreen = true;
+
+            // Set EWMH fullscreen state
+            let _ = self.conn.set_window_state(window, &[self.conn.net_wm_state_fullscreen]);
+        }
+
+        // Re-apply layout (fullscreen windows get special treatment in apply_layout)
+        self.apply_layout()?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Set fullscreen state for a window explicitly (for EWMH client messages).
+    pub fn set_fullscreen(&mut self, window: XWindow, fullscreen: bool) -> Result<()> {
+        let is_fullscreen = self.windows.get(&window).map(|w| w.fullscreen).unwrap_or(false);
+        if is_fullscreen != fullscreen {
+            self.toggle_fullscreen(window)?;
+        }
         Ok(())
     }
 
@@ -403,11 +561,12 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Update border colors for all visible windows based on focus state.
+    /// Update border colors for all visible windows based on focus and urgency state.
     pub fn update_borders(&mut self) -> Result<()> {
         let focused = self.focused_window;
         let focused_color = self.config.border_color_focused;
         let unfocused_color = self.config.border_color_unfocused;
+        let urgent_color = self.config.border_color_urgent;
         let border_width = self.config.border_width;
 
         // Get all visible workspace indices
@@ -416,12 +575,25 @@ impl WindowManager {
         // Update borders for all windows on visible workspaces
         for ws_idx in visible_ws {
             for window in self.workspaces[ws_idx].all_windows() {
-                let color = if Some(window) == focused {
+                // Check if window is urgent (and not focused - focused clears urgency)
+                let is_urgent = self.windows.get(&window)
+                    .map(|w| w.urgent && Some(window) != focused)
+                    .unwrap_or(false);
+
+                let color = if is_urgent {
+                    urgent_color
+                } else if Some(window) == focused {
                     focused_color
                 } else {
                     unfocused_color
                 };
-                self.conn.set_border(window, border_width, color)?;
+
+                // If window has a frame, set border on the frame instead
+                if self.windows.get(&window).and_then(|w| w.frame).is_some() {
+                    self.frames.set_frame_border(&self.conn.conn, window, color)?;
+                } else {
+                    self.conn.set_border(window, border_width, color)?;
+                }
             }
         }
         Ok(())
@@ -446,6 +618,37 @@ impl WindowManager {
 
         // Layout each monitor's active workspace
         for (ws_idx, screen) in &visible_workspaces {
+            // Check for fullscreen windows on this workspace
+            let fullscreen_windows: Vec<XWindow> = self.windows.iter()
+                .filter(|(_, w)| w.workspace == *ws_idx && w.fullscreen)
+                .map(|(id, _)| *id)
+                .collect();
+
+            // If there's a fullscreen window, it takes the whole monitor
+            if let Some(&fs_window) = fullscreen_windows.first() {
+                tracing::debug!(
+                    "apply_layout: FULLSCREEN window={} on monitor {:?}",
+                    fs_window, screen
+                );
+
+                // Configure fullscreen window to cover entire monitor (no gaps, no borders)
+                self.conn.configure_window(
+                    fs_window,
+                    screen.x,
+                    screen.y,
+                    screen.width,
+                    screen.height,
+                    0, // No border for fullscreen
+                )?;
+
+                // Raise fullscreen window above everything
+                let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+                self.conn.conn.configure_window(fs_window, &aux)?;
+
+                // Skip normal layout for this workspace - fullscreen window covers everything
+                continue;
+            }
+
             let work_area = Rect::new(
                 screen.x + gap_outer,
                 screen.y + gap_outer,
@@ -460,6 +663,10 @@ impl WindowManager {
                 ws.tree.window_count(), ws.floating.len()
             );
 
+            // Get titlebar settings
+            let titlebar_enabled = self.config.titlebar_enabled;
+            let titlebar_height = self.config.titlebar_height as u16;
+
             // 1. Configure tiled windows from the BSP tree
             let geometries = ws.tree.calculate_geometries(work_area);
             for (window, rect) in &geometries {
@@ -473,19 +680,42 @@ impl WindowManager {
                 let final_width = gapped_width.saturating_sub(2 * border_width as u16);
                 let final_height = gapped_height.saturating_sub(2 * border_width as u16);
 
-                tracing::debug!(
-                    "apply_layout: TILED window={} at ({}, {}) size {}x{}",
-                    window, gapped_x, gapped_y, final_width.max(1), final_height.max(1)
-                );
+                // Check if window has a frame
+                let has_frame = self.windows.get(window).and_then(|w| w.frame).is_some();
 
-                self.conn.configure_window(
-                    *window,
-                    gapped_x,
-                    gapped_y,
-                    final_width.max(1),
-                    final_height.max(1),
-                    border_width,
-                )?;
+                if has_frame && titlebar_enabled {
+                    // Configure frame (includes titlebar height)
+                    let client_height = final_height.saturating_sub(titlebar_height);
+                    self.frames.configure_frame(
+                        &self.conn.conn,
+                        *window,
+                        gapped_x,
+                        gapped_y,
+                        final_width.max(1),
+                        client_height.max(1),
+                        titlebar_height,
+                        border_width as u16,
+                    )?;
+
+                    tracing::debug!(
+                        "apply_layout: TILED+FRAME window={} at ({}, {}) size {}x{} (titlebar: {})",
+                        window, gapped_x, gapped_y, final_width.max(1), final_height.max(1), titlebar_height
+                    );
+                } else {
+                    tracing::debug!(
+                        "apply_layout: TILED window={} at ({}, {}) size {}x{}",
+                        window, gapped_x, gapped_y, final_width.max(1), final_height.max(1)
+                    );
+
+                    self.conn.configure_window(
+                        *window,
+                        gapped_x,
+                        gapped_y,
+                        final_width.max(1),
+                        final_height.max(1),
+                        border_width,
+                    )?;
+                }
             }
 
             // 2. Configure floating windows and stack them above tiled
@@ -498,24 +728,52 @@ impl WindowManager {
                     let adjusted_width = geom.width.saturating_sub(2 * border_width as u16);
                     let adjusted_height = geom.height.saturating_sub(2 * border_width as u16);
 
-                    tracing::debug!(
-                        "apply_layout: FLOATING window={} at ({}, {}) size {}x{} (raising)",
-                        window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
-                    );
+                    let has_frame = win.frame.is_some();
 
-                    // Configure geometry
-                    self.conn.configure_window(
-                        window_id,
-                        geom.x,
-                        geom.y,
-                        adjusted_width.max(1),
-                        adjusted_height.max(1),
-                        border_width,
-                    )?;
+                    if has_frame && titlebar_enabled {
+                        // Configure frame for floating window
+                        let client_height = adjusted_height.saturating_sub(titlebar_height);
+                        self.frames.configure_frame(
+                            &self.conn.conn,
+                            window_id,
+                            geom.x,
+                            geom.y,
+                            adjusted_width.max(1),
+                            client_height.max(1),
+                            titlebar_height,
+                            border_width as u16,
+                        )?;
 
-                    // Raise to top of stack (each subsequent window goes above the previous)
-                    let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
-                    self.conn.conn.configure_window(window_id, &aux)?;
+                        // Raise frame to top of stack
+                        if let Some(frame) = self.frames.frame_for_client(window_id) {
+                            let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+                            self.conn.conn.configure_window(frame, &aux)?;
+                        }
+
+                        tracing::debug!(
+                            "apply_layout: FLOATING+FRAME window={} at ({}, {}) size {}x{} (raising)",
+                            window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
+                        );
+                    } else {
+                        tracing::debug!(
+                            "apply_layout: FLOATING window={} at ({}, {}) size {}x{} (raising)",
+                            window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
+                        );
+
+                        // Configure geometry
+                        self.conn.configure_window(
+                            window_id,
+                            geom.x,
+                            geom.y,
+                            adjusted_width.max(1),
+                            adjusted_height.max(1),
+                            border_width,
+                        )?;
+
+                        // Raise to top of stack (each subsequent window goes above the previous)
+                        let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+                        self.conn.conn.configure_window(window_id, &aux)?;
+                    }
                 } else {
                     tracing::warn!("apply_layout: floating window {} not in windows map!", window_id);
                 }
