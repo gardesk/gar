@@ -535,21 +535,17 @@ impl WindowManager {
 
         // Focus the clicked window
         if self.focused_window != Some(window) {
-            // Regrab button on old focused window (unless it's floating - keep grab for edge resize)
+            // Regrab button on old focused window for click-to-focus
             if let Some(old) = self.focused_window {
-                if !self.is_floating(old) {
-                    self.conn.grab_button(old)?;
-                }
+                self.conn.grab_button(old)?;
             }
 
             // Set focus
             self.set_focus(window, false)?;
 
-            // For non-floating windows, ungrab button for click-through
-            // For floating windows, keep grab for edge resize detection
-            if !self.is_floating(window) {
-                self.conn.ungrab_button(window)?;
-            }
+            // Ungrab buttons so clicks pass through to the application
+            // Edge resize detection uses POINTER_MOTION events, not button grabs
+            self.conn.ungrab_button(window)?;
 
             // Raise floating windows on focus
             if self.is_floating(window) {
@@ -2074,9 +2070,10 @@ impl WindowManager {
                     | EventMask::POINTER_MOTION,
             )?;
 
-            // Re-establish button grabs for edge resize detection
-            // (buttons may have been ungrabbed when the window was focused as tiled)
-            self.conn.grab_button(window)?;
+            // Don't grab buttons - the window is already focused (we're acting on focused window)
+            // and grabbing would intercept all clicks, preventing app interaction.
+            // Mod+button grabs on root handle floating move/resize.
+            // Button grabs are only for click-to-focus on unfocused windows.
 
             // Add to floating list (on top)
             self.current_workspace_mut().add_floating(window);
