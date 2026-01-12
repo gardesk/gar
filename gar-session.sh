@@ -8,14 +8,16 @@
 #   --output HDMI-1 --mode 2560x1440 --pos 1920x0
 
 # Launch compositor before WM (for proper screen repainting)
-# --use-ewmh-active-win uses _NET_ACTIVE_WINDOW for focus detection
 if command -v picom &> /dev/null; then
     picom -b --use-ewmh-active-win &
-    sleep 0.1  # Brief pause to let compositor initialize
+    sleep 0.1
 fi
 
 # Set log level
 export GAR_LOG=info
+
+# Launch polybar after gar starts (needs i3 IPC socket)
+(sleep 0.5 && ~/.config/polybar/launch.sh) &
 
 # Start gar
 exec /home/mfwolffe/GithubOrgs/tenseleyFlow/gar/target/release/gar
