@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use x11rb::protocol::xproto::{ConnectionExt, Window as XWindow};
 
 use crate::config::{Config, LuaConfig, LuaState, RuleActions, WindowMatch};
-use crate::ipc::IpcServer;
+use crate::ipc::{IpcServer, I3IpcServer};
 use crate::x11::Connection;
 use crate::x11::events::DragState;
 use crate::x11::FrameManager;
@@ -33,6 +33,8 @@ pub struct WindowManager {
     pub running: bool,
     pub drag_state: Option<DragState>,
     pub ipc_server: Option<IpcServer>,
+    /// i3-compatible IPC server for polybar integration
+    pub i3_ipc_server: Option<I3IpcServer>,
     /// Timestamp of last pointer warp - used to suppress EnterNotify feedback loop
     pub last_warp: std::time::Instant,
     /// Frame manager for title bars
@@ -62,6 +64,15 @@ impl WindowManager {
             Ok(server) => Some(server),
             Err(e) => {
                 tracing::warn!("Failed to start IPC server: {}", e);
+                None
+            }
+        };
+
+        // Initialize i3-compatible IPC server (optional - graceful failure)
+        let i3_ipc_server = match I3IpcServer::new() {
+            Ok(server) => Some(server),
+            Err(e) => {
+                tracing::warn!("Failed to start i3-compatible IPC server: {}", e);
                 None
             }
         };
@@ -112,6 +123,7 @@ impl WindowManager {
             running: true,
             drag_state: None,
             ipc_server,
+            i3_ipc_server,
             last_warp: std::time::Instant::now(),
             frames: FrameManager::new(),
         })

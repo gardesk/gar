@@ -178,10 +178,12 @@ impl WindowManager {
             Event::RandrScreenChangeNotify(_) => {
                 tracing::info!("RandR screen change detected, refreshing monitors");
                 self.refresh_monitors()?;
+                self.broadcast_i3_output_event();
             }
             Event::RandrNotify(_) => {
                 tracing::info!("RandR notify event, refreshing monitors");
                 self.refresh_monitors()?;
+                self.broadcast_i3_output_event();
             }
             Event::ClientMessage(e) => {
                 self.handle_client_message(e)?;
@@ -967,6 +969,9 @@ impl WindowManager {
             return Ok(());
         }
 
+        // Track old workspace for event broadcasting
+        let old_workspace_idx = self.focused_workspace;
+
         // Check if workspace is already visible on some monitor
         let visible_on_monitor = self.monitors.iter().position(|m| m.active_workspace == idx);
 
@@ -1059,6 +1064,11 @@ impl WindowManager {
                 self.conn.warp_pointer(center_x, center_y)?;
                 self.last_warp = std::time::Instant::now();
             }
+        }
+
+        // Broadcast i3 workspace event for polybar
+        if idx != old_workspace_idx {
+            self.broadcast_i3_workspace_event("focus", idx, Some(old_workspace_idx));
         }
 
         self.conn.flush()?;
@@ -1213,6 +1223,9 @@ impl WindowManager {
 
             // Handle IPC requests
             self.handle_ipc()?;
+
+            // Handle i3-compatible IPC requests (for polybar)
+            self.handle_i3_ipc()?;
 
             // Small sleep to avoid busy-waiting when idle
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1736,6 +1749,187 @@ impl WindowManager {
         }
 
         Ok(())
+    }
+
+    // =========================================================================
+    // i3-compatible IPC handling (for polybar integration)
+    // =========================================================================
+
+    /// Handle pending i3-compatible IPC requests
+    fn handle_i3_ipc(&mut self) -> Result<()> {
+        use crate::ipc::i3_compat::MessageType;
+        use crate::ipc::i3_server::{
+            build_workspaces_json, build_outputs_json, build_version_json,
+            build_subscribe_success_json,
+        };
+
+        let Some(ref mut i3_ipc) = self.i3_ipc_server else {
+            return Ok(());
+        };
+
+        // Accept new connections
+        i3_ipc.accept_connections();
+
+        // Process requests
+        let requests = i3_ipc.poll_requests();
+        for (client_idx, msg) in requests {
+            let msg_type = msg.msg_type;
+
+            match MessageType::from_u32(msg_type) {
+                Some(MessageType::GetWorkspaces) => {
+                    let workspaces = self.build_i3_workspaces();
+                    let json = build_workspaces_json(&workspaces);
+                    if let Some(ref mut i3_ipc) = self.i3_ipc_server {
+                        i3_ipc.send_response(client_idx, msg_type, &json);
+                    }
+                }
+                Some(MessageType::GetOutputs) => {
+                    let outputs = self.build_i3_outputs();
+                    let json = build_outputs_json(&outputs);
+                    if let Some(ref mut i3_ipc) = self.i3_ipc_server {
+                        i3_ipc.send_response(client_idx, msg_type, &json);
+                    }
+                }
+                Some(MessageType::Subscribe) => {
+                    // Parse subscription request
+                    if let Ok(events) = msg.payload_str() {
+                        if let Ok(event_list) = serde_json::from_str::<Vec<String>>(events) {
+                            if let Some(ref mut i3_ipc) = self.i3_ipc_server {
+                                i3_ipc.subscribe(client_idx, event_list);
+                            }
+                        }
+                    }
+                    let json = build_subscribe_success_json();
+                    if let Some(ref mut i3_ipc) = self.i3_ipc_server {
+                        i3_ipc.send_response(client_idx, msg_type, &json);
+                    }
+                }
+                Some(MessageType::GetVersion) => {
+                    let json = build_version_json();
+                    if let Some(ref mut i3_ipc) = self.i3_ipc_server {
+                        i3_ipc.send_response(client_idx, msg_type, &json);
+                    }
+                }
+                Some(MessageType::RunCommand) => {
+                    // Return success for now - we could parse and execute i3 commands later
+                    let json = r#"[{"success":true}]"#;
+                    if let Some(ref mut i3_ipc) = self.i3_ipc_server {
+                        i3_ipc.send_response(client_idx, msg_type, json);
+                    }
+                }
+                _ => {
+                    // Unknown or unsupported message type - return empty success
+                    let json = r#"{"success":false,"error":"unsupported"}"#;
+                    if let Some(ref mut i3_ipc) = self.i3_ipc_server {
+                        i3_ipc.send_response(client_idx, msg_type, json);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Build i3-compatible workspace list
+    fn build_i3_workspaces(&self) -> Vec<crate::ipc::I3WorkspaceInfo> {
+        use crate::ipc::{I3WorkspaceInfo, I3Rect};
+
+        self.workspaces.iter().enumerate().map(|(i, ws)| {
+            // Find which monitor this workspace is on (if visible)
+            let monitor = self.monitors.iter().find(|m| m.active_workspace == i);
+            let visible = monitor.is_some();
+            let focused = self.focused_monitor < self.monitors.len()
+                && self.monitors[self.focused_monitor].active_workspace == i;
+
+            // Check if any window in this workspace is urgent
+            let urgent = self.windows.values()
+                .filter(|w| w.workspace == i)
+                .any(|w| w.urgent);
+
+            // Get geometry from monitor if visible, else use first monitor's geometry
+            let (rect, output) = if let Some(mon) = monitor {
+                (
+                    I3Rect {
+                        x: mon.geometry.x as i32,
+                        y: mon.geometry.y as i32,
+                        width: mon.geometry.width as i32,
+                        height: mon.geometry.height as i32,
+                    },
+                    mon.name.clone(),
+                )
+            } else {
+                // Not visible - use first monitor as fallback
+                let fallback = &self.monitors[0];
+                (
+                    I3Rect {
+                        x: fallback.geometry.x as i32,
+                        y: fallback.geometry.y as i32,
+                        width: fallback.geometry.width as i32,
+                        height: fallback.geometry.height as i32,
+                    },
+                    fallback.name.clone(),
+                )
+            };
+
+            I3WorkspaceInfo {
+                id: (i + 1) as i64 * 1000000, // Generate unique ID
+                num: (i + 1) as i32,
+                name: ws.name.clone(),
+                visible,
+                focused,
+                urgent,
+                rect,
+                output,
+            }
+        }).collect()
+    }
+
+    /// Build i3-compatible output list
+    fn build_i3_outputs(&self) -> Vec<crate::ipc::OutputInfo> {
+        use crate::ipc::{OutputInfo, I3Rect};
+
+        self.monitors.iter().map(|mon| {
+            let current_workspace = Some(self.workspaces[mon.active_workspace].name.clone());
+
+            OutputInfo {
+                name: mon.name.clone(),
+                active: true,
+                primary: mon.primary,
+                current_workspace,
+                rect: I3Rect {
+                    x: mon.geometry.x as i32,
+                    y: mon.geometry.y as i32,
+                    width: mon.geometry.width as i32,
+                    height: mon.geometry.height as i32,
+                },
+            }
+        }).collect()
+    }
+
+    /// Broadcast i3 workspace event to subscribed clients
+    pub fn broadcast_i3_workspace_event(&mut self, change: &str, workspace_idx: usize, old_workspace_idx: Option<usize>) {
+        use crate::ipc::i3_server::build_workspace_event_json;
+
+        let workspaces = self.build_i3_workspaces();
+        let current = workspaces.get(workspace_idx).cloned();
+        let old = old_workspace_idx.and_then(|idx| workspaces.get(idx).cloned());
+
+        if let Some(current) = current {
+            let json = build_workspace_event_json(change, &current, old.as_ref());
+            if let Some(ref mut i3_ipc) = self.i3_ipc_server {
+                i3_ipc.broadcast_workspace_event(&json);
+            }
+        }
+    }
+
+    /// Broadcast i3 output event to subscribed clients
+    pub fn broadcast_i3_output_event(&mut self) {
+        use crate::ipc::i3_server::build_output_event_json;
+
+        let json = build_output_event_json();
+        if let Some(ref mut i3_ipc) = self.i3_ipc_server {
+            i3_ipc.broadcast_output_event(&json);
+        }
     }
 }
 
