@@ -8,6 +8,13 @@ xrandr \
   --output HDMI-1 --mode 2560x1440 --pos 1920x0 \
   --output HDMI-0 --mode 3840x2160 --pos 4480x0
 
+# Launch compositor before WM (for proper screen repainting)
+# --use-ewmh-active-win uses _NET_ACTIVE_WINDOW for focus detection
+if command -v picom &> /dev/null; then
+    picom -b --use-ewmh-active-win &
+    sleep 0.1  # Brief pause to let compositor initialize
+fi
+
 # Set log level
 export GAR_LOG=info
 

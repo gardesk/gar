@@ -84,6 +84,13 @@ xrandr \\
   --output HDMI-1 --mode 2560x1440 --pos 1920x0 \\
   --output HDMI-0 --mode 3840x2160 --pos 4480x0
 
+# Launch compositor before WM (for proper screen repainting)
+# --use-ewmh-active-win uses _NET_ACTIVE_WINDOW for focus detection
+if command -v picom > /dev/null 2>&1; then
+    picom -b --use-ewmh-active-win &
+    sleep 0.1
+fi
+
 # Start gar
 exec $GAR_BIN
 EOF

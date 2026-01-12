@@ -1,0 +1,93 @@
+/* Rofi theme for gar window manager */
+/* Copy to ~/.config/rofi/gar.rasi */
+/* Use with: rofi -theme gar -show drun */
+
+* {
+    bg:         #1a1a2e;
+    bg-alt:     #2d2d44;
+    fg:         #e0e0e0;
+    fg-alt:     #a0a0a0;
+    accent:     #5294e2;
+    urgent:     #ff5555;
+
+    background-color:   @bg;
+    text-color:         @fg;
+    border-color:       @accent;
+}
+
+window {
+    width:              600px;
+    border:             2px;
+    border-color:       @accent;
+    border-radius:      0px;
+    padding:            0px;
+}
+
+mainbox {
+    spacing:            0;
+    children:           [ inputbar, message, listview ];
+}
+
+inputbar {
+    padding:            12px;
+    background-color:   @bg-alt;
+    children:           [ prompt, entry ];
+}
+
+prompt {
+    text-color:         @accent;
+    padding:            0 8px 0 0;
+}
+
+entry {
+    placeholder:        "Search...";
+    placeholder-color:  @fg-alt;
+}
+
+message {
+    padding:            8px;
+    background-color:   @bg-alt;
+}
+
+listview {
+    lines:              8;
+    columns:            1;
+    fixed-height:       false;
+    spacing:            0;
+    scrollbar:          false;
+}
+
+element {
+    padding:            10px 12px;
+    spacing:            8px;
+}
+
+element normal.normal {
+    background-color:   @bg;
+}
+
+element alternate.normal {
+    background-color:   @bg;
+}
+
+element selected.normal {
+    background-color:   @accent;
+    text-color:         @bg;
+}
+
+element normal.urgent {
+    text-color:         @urgent;
+}
+
+element selected.urgent {
+    background-color:   @urgent;
+    text-color:         @bg;
+}
+
+element-icon {
+    size:               24px;
+}
+
+element-text {
+    vertical-align:     0.5;
+}

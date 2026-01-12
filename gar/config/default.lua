@@ -1,12 +1,25 @@
 -- gar default configuration
 -- Copy to ~/.config/gar/init.lua to customize
 
+-- Autostart applications (only run once per session)
+-- Uncomment the ones you want:
+-- gar.exec_once("polybar")                    -- Status bar
+-- gar.exec_once("picom")                      -- Compositor (for transparency/shadows)
+-- gar.exec_once("dunst")                      -- Notification daemon
+-- gar.exec_once("nm-applet")                  -- NetworkManager tray icon
+-- gar.exec_once("blueman-applet")             -- Bluetooth tray icon
+-- gar.exec_once("feh --bg-scale ~/wallpaper.jpg")  -- Wallpaper
+-- gar.exec_once("xss-lock -- i3lock -c 000000")    -- Auto-lock on suspend
+
 -- Appearance
 gar.set("border_width", 2)
 gar.set("border_color_focused", "#5294e2")
 gar.set("border_color_unfocused", "#2d2d2d")
 gar.set("gap_inner", 8)
 gar.set("gap_outer", 8)
+
+-- Behavior
+gar.set("follow_window_on_move", true)  -- Follow window when using Mod+Shift+number
 
 -- Mod key: "mod" = Super/Win, "alt" = Alt
 -- Use "mod" for real X session, "alt" for nested testing (Xephyr)
@@ -66,8 +79,11 @@ gar.bind(mod .. "+e", gar.equalize)
 -- Toggle floating
 gar.bind(mod .. "+f", gar.toggle_floating)
 
+-- Toggle fullscreen
+gar.bind(mod .. "+shift+f", gar.toggle_fullscreen)
+
 -- Cycle through floating windows
-gar.bind(mod .. "+Tab", gar.cycle_floating)
+gar.bind(mod .. "+grave", gar.cycle_floating)  -- Mod+` (backtick)
 
 -- Workspaces
 for i = 1, 9 do
@@ -82,3 +98,52 @@ gar.bind(mod .. "+comma", gar.focus_monitor("prev"))
 gar.bind(mod .. "+period", gar.focus_monitor("next"))
 gar.bind(mod .. "+shift+comma", gar.move_to_monitor("prev"))
 gar.bind(mod .. "+shift+period", gar.move_to_monitor("next"))
+
+-- Launchers (rofi)
+-- Use -theme gar if you've installed config/rofi-gar.rasi to ~/.config/rofi/
+gar.bind(mod .. "+space", function()
+    gar.exec("rofi -show drun -show-icons")
+end)
+gar.bind(mod .. "+Tab", function()
+    gar.exec("rofi -show window -show-icons")  -- Window switcher (uses EWMH)
+end)
+gar.bind(mod .. "+r", function()
+    gar.exec("rofi -show run")
+end)
+
+-- dmenu alternative (if rofi not available)
+gar.bind(mod .. "+p", function()
+    gar.exec("dmenu_run")
+end)
+
+-- Screenshot (requires scrot or maim)
+gar.bind("Print", function()
+    gar.exec("scrot -e 'mv $f ~/Pictures/' || maim ~/Pictures/screenshot-$(date +%s).png")
+end)
+gar.bind(mod .. "+Print", function()
+    gar.exec("scrot -s -e 'mv $f ~/Pictures/' || maim -s ~/Pictures/screenshot-$(date +%s).png")
+end)
+
+-- Lock screen (requires i3lock, swaylock, or slock)
+gar.bind(mod .. "+Escape", function()
+    gar.exec("i3lock -c 000000 || swaylock -c 000000 || slock")
+end)
+
+-- Volume controls (requires pactl/pamixer)
+gar.bind("XF86AudioRaiseVolume", function()
+    gar.exec("pactl set-sink-volume @DEFAULT_SINK@ +5% || pamixer -i 5")
+end)
+gar.bind("XF86AudioLowerVolume", function()
+    gar.exec("pactl set-sink-volume @DEFAULT_SINK@ -5% || pamixer -d 5")
+end)
+gar.bind("XF86AudioMute", function()
+    gar.exec("pactl set-sink-mute @DEFAULT_SINK@ toggle || pamixer -t")
+end)
+
+-- Brightness controls (requires brightnessctl or light)
+gar.bind("XF86MonBrightnessUp", function()
+    gar.exec("brightnessctl set +10% || light -A 10")
+end)
+gar.bind("XF86MonBrightnessDown", function()
+    gar.exec("brightnessctl set 10%- || light -U 10")
+end)
