@@ -1,7 +1,7 @@
 use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ButtonIndex, ChangeWindowAttributesAux, ClientMessageData,
-    ClientMessageEvent, ConfigureWindowAux, ConnectionExt, EventMask, GrabMode, InputFocus,
+    ClientMessageEvent, ConfigureWindowAux, ConnectionExt, EventMask, Font, GrabMode, InputFocus,
     ModMask, Screen, Window,
 };
 use x11rb::rust_connection::RustConnection;
@@ -29,6 +29,15 @@ pub struct SizeHints {
     pub base_height: Option<u32>,
     pub width_inc: Option<u32>,
     pub height_inc: Option<u32>,
+}
+
+/// Reserved screen area (strut) from _NET_WM_STRUT or _NET_WM_STRUT_PARTIAL.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Strut {
+    pub left: u32,
+    pub right: u32,
+    pub top: u32,
+    pub bottom: u32,
 }
 
 pub struct Connection {
@@ -71,6 +80,9 @@ pub struct Connection {
     pub utf8_string: Atom,
     // Compositor integration
     pub net_wm_bypass_compositor: Atom,
+    // Struts (reserved screen areas for docks/panels)
+    pub net_wm_strut: Atom,
+    pub net_wm_strut_partial: Atom,
 }
 
 impl Connection {
@@ -126,6 +138,10 @@ impl Connection {
         // Compositor integration atom - apps can set this to request un-redirection for fullscreen
         let net_wm_bypass_compositor = conn.intern_atom(false, b"_NET_WM_BYPASS_COMPOSITOR")?.reply()?.atom;
 
+        // Strut atoms for dock/panel reserved areas
+        let net_wm_strut = conn.intern_atom(false, b"_NET_WM_STRUT")?.reply()?.atom;
+        let net_wm_strut_partial = conn.intern_atom(false, b"_NET_WM_STRUT_PARTIAL")?.reply()?.atom;
+
         tracing::info!(
             "Connected to X server, screen {}x{}",
             screen_width,
@@ -167,6 +183,8 @@ impl Connection {
             net_active_window,
             utf8_string,
             net_wm_bypass_compositor,
+            net_wm_strut,
+            net_wm_strut_partial,
         })
     }
 
@@ -175,7 +193,11 @@ impl Connection {
     }
 
     pub fn become_wm(&self) -> Result<(), Error> {
-        // Set root window background to black and subscribe to events
+        // Create a normal pointer cursor for the root window
+        // This prevents the ugly X cursor when no windows are focused
+        let cursor = self.create_cursor()?;
+
+        // Set root window background to black, cursor, and subscribe to events
         // The background ensures old window pixels are cleared when windows close
         let change = ChangeWindowAttributesAux::new()
             .event_mask(
@@ -184,7 +206,8 @@ impl Connection {
                     | EventMask::STRUCTURE_NOTIFY
                     | EventMask::PROPERTY_CHANGE,
             )
-            .background_pixel(self.screen().black_pixel);
+            .background_pixel(self.screen().black_pixel)
+            .cursor(cursor);
 
         let result = self
             .conn
@@ -216,6 +239,31 @@ impl Connection {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Create a left pointer cursor from the cursor font.
+    fn create_cursor(&self) -> Result<u32, Error> {
+        // Open the cursor font
+        let font: Font = self.conn.generate_id()?;
+        self.conn.open_font(font, b"cursor")?;
+
+        // Create cursor from font glyphs
+        // left_ptr is glyph 68, its mask is glyph 69
+        let cursor = self.conn.generate_id()?;
+        self.conn.create_glyph_cursor(
+            cursor,
+            font,
+            font,
+            68,  // left_ptr glyph
+            69,  // mask glyph
+            0, 0, 0,           // foreground RGB (black)
+            0xFFFF, 0xFFFF, 0xFFFF,  // background RGB (white)
+        )?;
+
+        // Close font (cursor keeps its own reference)
+        self.conn.close_font(font)?;
+
+        Ok(cursor)
     }
 
     /// Grab a key combination on the root window.
@@ -760,6 +808,66 @@ impl Connection {
         }
 
         Some(hints)
+    }
+
+    /// Get _NET_WM_STRUT or _NET_WM_STRUT_PARTIAL for a window.
+    /// Returns (left, right, top, bottom) reserved pixels.
+    pub fn get_strut(&self, window: Window) -> Option<Strut> {
+        // Try _NET_WM_STRUT_PARTIAL first (more detailed)
+        let reply = self.conn.get_property(
+            false,
+            window,
+            self.net_wm_strut_partial,
+            AtomEnum::CARDINAL,
+            0,
+            12, // STRUT_PARTIAL has 12 cardinals
+        ).ok()?.reply().ok();
+
+        if let Some(reply) = reply {
+            if reply.format == 32 && reply.value.len() >= 16 {
+                let values: Vec<u32> = reply.value
+                    .chunks_exact(4)
+                    .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+
+                if values.len() >= 4 {
+                    return Some(Strut {
+                        left: values[0],
+                        right: values[1],
+                        top: values[2],
+                        bottom: values[3],
+                    });
+                }
+            }
+        }
+
+        // Fall back to _NET_WM_STRUT (simpler, 4 cardinals)
+        let reply = self.conn.get_property(
+            false,
+            window,
+            self.net_wm_strut,
+            AtomEnum::CARDINAL,
+            0,
+            4,
+        ).ok()?.reply().ok()?;
+
+        if reply.format == 32 && reply.value.len() >= 16 {
+            let values: Vec<u32> = reply.value
+                .chunks_exact(4)
+                .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
+
+            if values.len() >= 4 {
+                return Some(Strut {
+                    left: values[0],
+                    right: values[1],
+                    top: values[2],
+                    bottom: values[3],
+                });
+            }
+        }
+
+        None
     }
 
     /// Set _NET_SUPPORTED on root window to advertise supported EWMH atoms.
