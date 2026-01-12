@@ -35,6 +35,10 @@ impl Workspace {
         self.tree.is_empty() && self.floating.is_empty()
     }
 
+    pub fn has_windows(&self) -> bool {
+        !self.is_empty()
+    }
+
     /// Add a window to the floating list (on top)
     pub fn add_floating(&mut self, window: XWindow) {
         if !self.floating.contains(&window) {

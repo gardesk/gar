@@ -17,6 +17,8 @@ pub enum Action {
     CloseWindow,
     ForceCloseWindow,  // Force kill without asking nicely
     Workspace(usize),
+    WorkspaceNext,
+    WorkspacePrev,
     MoveToWorkspace(usize),
     Equalize,
     Reload,
@@ -352,6 +354,8 @@ impl LuaConfig {
                                 let n: usize = t.get("workspace").unwrap_or(1);
                                 Action::Workspace(n)
                             }
+                            "workspace_next" => Action::WorkspaceNext,
+                            "workspace_prev" => Action::WorkspacePrev,
                             "move_to_workspace" => {
                                 let n: usize = t.get("workspace").unwrap_or(1);
                                 Action::MoveToWorkspace(n)
@@ -535,6 +539,22 @@ impl LuaConfig {
             Ok(t)
         })?;
         gar.set("workspace", workspace_fn)?;
+
+        // gar.workspace_next()
+        let workspace_next_fn = self.lua.create_function(|lua, ()| {
+            let t = lua.create_table()?;
+            t.set("action", "workspace_next")?;
+            Ok(t)
+        })?;
+        gar.set("workspace_next", workspace_next_fn)?;
+
+        // gar.workspace_prev()
+        let workspace_prev_fn = self.lua.create_function(|lua, ()| {
+            let t = lua.create_table()?;
+            t.set("action", "workspace_prev")?;
+            Ok(t)
+        })?;
+        gar.set("workspace_prev", workspace_prev_fn)?;
 
         // gar.move_to_workspace(n)
         let move_fn = self.lua.create_function(|lua, n: usize| {

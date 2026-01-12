@@ -813,6 +813,28 @@ impl WindowManager {
                 // Lua uses 1-based indexing
                 self.switch_workspace(idx.saturating_sub(1))?;
             }
+            Action::WorkspaceNext => {
+                // Find next workspace with windows, wrapping around
+                let len = self.workspaces.len();
+                for i in 1..=len {
+                    let idx = (self.focused_workspace + i) % len;
+                    if self.workspaces[idx].has_windows() {
+                        self.switch_workspace(idx)?;
+                        break;
+                    }
+                }
+            }
+            Action::WorkspacePrev => {
+                // Find previous workspace with windows, wrapping around
+                let len = self.workspaces.len();
+                for i in 1..=len {
+                    let idx = (self.focused_workspace + len - i) % len;
+                    if self.workspaces[idx].has_windows() {
+                        self.switch_workspace(idx)?;
+                        break;
+                    }
+                }
+            }
             Action::MoveToWorkspace(idx) => {
                 // Lua uses 1-based indexing
                 self.move_to_workspace(idx.saturating_sub(1))?;
