@@ -757,12 +757,193 @@ impl WindowManager {
         self.adopt_existing_windows()?;
 
         while self.running {
-            let event = self.conn.conn.wait_for_event()?;
-            self.handle_event(event)?;
+            // Handle X11 events (non-blocking poll)
+            while let Some(event) = self.conn.conn.poll_for_event()? {
+                self.handle_event(event)?;
+            }
+
+            // Handle IPC requests
+            self.handle_ipc()?;
+
+            // Small sleep to avoid busy-waiting when idle
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
         tracing::info!("Event loop exited");
         Ok(())
+    }
+
+    /// Handle pending IPC requests
+    fn handle_ipc(&mut self) -> Result<()> {
+        let Some(ref mut ipc) = self.ipc_server else {
+            return Ok(());
+        };
+
+        // Accept new connections
+        ipc.accept_connections();
+
+        // Process requests
+        let requests = ipc.poll_requests();
+        for (client_idx, request) in requests {
+            let response = self.dispatch_ipc_command(&request.command, request.args);
+            if let Some(ref mut ipc) = self.ipc_server {
+                ipc.send_response(client_idx, response);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Dispatch an IPC command and return a response
+    fn dispatch_ipc_command(&mut self, command: &str, args: serde_json::Value) -> crate::ipc::Response {
+        use crate::ipc::Response;
+
+        match command {
+            "focus" => {
+                let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(dir) = parse_direction(direction) {
+                    match self.focus_direction(dir) {
+                        Ok(_) => Response::success(None),
+                        Err(e) => Response::error(e.to_string()),
+                    }
+                } else {
+                    Response::error(format!("Invalid direction: {}", direction))
+                }
+            }
+            "swap" => {
+                let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(dir) = parse_direction(direction) {
+                    match self.swap_direction(dir) {
+                        Ok(_) => Response::success(None),
+                        Err(e) => Response::error(e.to_string()),
+                    }
+                } else {
+                    Response::error(format!("Invalid direction: {}", direction))
+                }
+            }
+            "resize" => {
+                let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("");
+                let amount = args.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.05) as f32;
+                if let Some(dir) = parse_direction(direction) {
+                    match self.resize_direction(dir, amount) {
+                        Ok(_) => Response::success(None),
+                        Err(e) => Response::error(e.to_string()),
+                    }
+                } else {
+                    Response::error(format!("Invalid direction: {}", direction))
+                }
+            }
+            "close" => {
+                if let Some(window) = self.focused_window {
+                    match self.close_window(window) {
+                        Ok(_) => Response::success(None),
+                        Err(e) => Response::error(e.to_string()),
+                    }
+                } else {
+                    Response::error("No focused window")
+                }
+            }
+            "workspace" => {
+                let n = args.get("number").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                match self.switch_workspace(n.saturating_sub(1)) {
+                    Ok(_) => Response::success(None),
+                    Err(e) => Response::error(e.to_string()),
+                }
+            }
+            "move_to_workspace" => {
+                let n = args.get("number").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                match self.move_to_workspace(n.saturating_sub(1)) {
+                    Ok(_) => Response::success(None),
+                    Err(e) => Response::error(e.to_string()),
+                }
+            }
+            "toggle_floating" => {
+                if let Some(window) = self.focused_window {
+                    match self.toggle_floating(window) {
+                        Ok(_) => Response::success(None),
+                        Err(e) => Response::error(e.to_string()),
+                    }
+                } else {
+                    Response::error("No focused window")
+                }
+            }
+            "equalize" => {
+                match self.equalize() {
+                    Ok(_) => Response::success(None),
+                    Err(e) => Response::error(e.to_string()),
+                }
+            }
+            "reload" => {
+                match self.reload_config() {
+                    Ok(_) => Response::success(None),
+                    Err(e) => Response::error(e.to_string()),
+                }
+            }
+            "exit" => {
+                self.running = false;
+                Response::success(None)
+            }
+            "get_workspaces" => {
+                Response::success(Some(self.get_workspaces_json()))
+            }
+            "get_focused" => {
+                Response::success(Some(self.get_focused_json()))
+            }
+            "get_tree" => {
+                Response::success(Some(self.get_tree_json()))
+            }
+            "subscribe" => {
+                // Handle subscription in handle_ipc directly
+                Response::success(None)
+            }
+            _ => Response::error(format!("Unknown command: {}", command)),
+        }
+    }
+
+    /// Get workspace info as JSON
+    fn get_workspaces_json(&self) -> serde_json::Value {
+        serde_json::json!(self.workspaces.iter().enumerate().map(|(i, ws)| {
+            serde_json::json!({
+                "id": ws.id,
+                "name": ws.name,
+                "focused": i == self.focused_workspace,
+                "tiled_count": ws.tree.window_count(),
+                "floating_count": ws.floating.len(),
+            })
+        }).collect::<Vec<_>>())
+    }
+
+    /// Get focused window info as JSON
+    fn get_focused_json(&self) -> serde_json::Value {
+        match self.focused_window {
+            Some(win_id) => {
+                if let Some(win) = self.windows.get(&win_id) {
+                    serde_json::json!({
+                        "id": win_id,
+                        "workspace": win.workspace + 1,
+                        "floating": win.floating,
+                    })
+                } else {
+                    serde_json::json!(null)
+                }
+            }
+            None => serde_json::json!(null),
+        }
+    }
+
+    /// Get window tree as JSON
+    fn get_tree_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "focused_workspace": self.focused_workspace + 1,
+            "workspaces": self.workspaces.iter().map(|ws| {
+                serde_json::json!({
+                    "id": ws.id,
+                    "name": ws.name,
+                    "tiled": ws.tree.windows(),
+                    "floating": ws.floating,
+                })
+            }).collect::<Vec<_>>()
+        })
     }
 
     // Floating window helpers

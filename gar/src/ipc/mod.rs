@@ -1,1 +1,5 @@
-// IPC module - Unix socket server comes in Sprint 6
+mod protocol;
+mod server;
+
+pub use protocol::{Event, Request, Response, WindowInfo, WorkspaceInfo};
+pub use server::IpcServer;

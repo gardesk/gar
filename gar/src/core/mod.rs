@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use x11rb::protocol::xproto::Window as XWindow;
 
 use crate::config::{Config, LuaConfig, LuaState, RuleActions, WindowMatch};
+use crate::ipc::IpcServer;
 use crate::x11::Connection;
 use crate::x11::events::DragState;
 use crate::Result;
@@ -29,6 +30,7 @@ pub struct WindowManager {
     pub focused_window: Option<XWindow>,
     pub running: bool,
     pub drag_state: Option<DragState>,
+    pub ipc_server: Option<IpcServer>,
 }
 
 impl WindowManager {
@@ -49,6 +51,15 @@ impl WindowManager {
         // Get config values from Lua state
         let config = lua_state.lock().unwrap().config.clone();
 
+        // Initialize IPC server (optional - graceful failure)
+        let ipc_server = match IpcServer::new() {
+            Ok(server) => Some(server),
+            Err(e) => {
+                tracing::warn!("Failed to start IPC server: {}", e);
+                None
+            }
+        };
+
         Ok(Self {
             conn,
             config,
@@ -61,6 +72,7 @@ impl WindowManager {
             focused_window: None,
             running: true,
             drag_state: None,
+            ipc_server,
         })
     }
 
