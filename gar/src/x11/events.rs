@@ -274,6 +274,10 @@ impl WindowManager {
         // are unmapped intentionally by us during workspace switching
         if is_visible {
             self.unmanage_window(window);
+
+            // Clear the entire root window to remove any leftover pixels
+            self.conn.clear_root_area(0, 0, self.conn.screen_width, self.conn.screen_height)?;
+
             self.apply_layout()?;
 
             // Focus next window or warp to monitor if none left
@@ -283,6 +287,8 @@ impl WindowManager {
                 // No windows left, warp to current monitor center
                 self.warp_to_monitor(self.focused_monitor)?;
             }
+
+            self.conn.flush()?;
         }
 
         Ok(())
@@ -293,6 +299,10 @@ impl WindowManager {
 
         // Remove from management
         self.unmanage_window(event.window);
+
+        // Clear the entire root window to remove any leftover pixels
+        // This is needed because X11 without a compositor doesn't automatically repaint
+        self.conn.clear_root_area(0, 0, self.conn.screen_width, self.conn.screen_height)?;
 
         // Re-apply layout
         self.apply_layout()?;
@@ -305,6 +315,7 @@ impl WindowManager {
             self.warp_to_monitor(self.focused_monitor)?;
         }
 
+        self.conn.flush()?;
         Ok(())
     }
 

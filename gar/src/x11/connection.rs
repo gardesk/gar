@@ -118,17 +118,34 @@ impl Connection {
     }
 
     pub fn become_wm(&self) -> Result<(), Error> {
-        let change = ChangeWindowAttributesAux::new().event_mask(
-            EventMask::SUBSTRUCTURE_REDIRECT
-                | EventMask::SUBSTRUCTURE_NOTIFY
-                | EventMask::STRUCTURE_NOTIFY
-                | EventMask::PROPERTY_CHANGE,
-        );
+        // Set root window background to black and subscribe to events
+        // The background ensures old window pixels are cleared when windows close
+        let change = ChangeWindowAttributesAux::new()
+            .event_mask(
+                EventMask::SUBSTRUCTURE_REDIRECT
+                    | EventMask::SUBSTRUCTURE_NOTIFY
+                    | EventMask::STRUCTURE_NOTIFY
+                    | EventMask::PROPERTY_CHANGE,
+            )
+            .background_pixel(self.screen().black_pixel);
 
         let result = self
             .conn
             .change_window_attributes(self.root, &change)?
             .check();
+
+        // Clear the root window to apply the background
+        if result.is_ok() {
+            self.conn.clear_area(
+                false,
+                self.root,
+                0,
+                0,
+                self.screen_width,
+                self.screen_height,
+            )?;
+            self.conn.flush()?;
+        }
 
         match result {
             Ok(_) => {
@@ -257,6 +274,12 @@ impl Connection {
 
         let configure = ConfigureWindowAux::new().border_width(width);
         self.conn.configure_window(window, &configure)?;
+        Ok(())
+    }
+
+    /// Clear an area of the root window (fills with background color).
+    pub fn clear_root_area(&self, x: i16, y: i16, width: u16, height: u16) -> Result<(), Error> {
+        self.conn.clear_area(false, self.root, x, y, width, height)?;
         Ok(())
     }
 
