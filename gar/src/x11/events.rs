@@ -579,12 +579,8 @@ impl WindowManager {
                         self.switch_workspace(ws_idx)?;
                     }
                 }
-                // Focus the window (external activation, warp pointer)
-                if let Some(old) = self.focused_window {
-                    self.conn.grab_button(old)?;
-                }
-                self.set_focus(window, true)?;
-                self.conn.ungrab_button(window)?;
+                // Focus the window (external activation, no warp - user is already interacting)
+                self.set_focus(window, false)?;
                 if self.is_floating(window) {
                     self.raise_window(window)?;
                 }

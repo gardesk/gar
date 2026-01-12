@@ -484,8 +484,18 @@ impl WindowManager {
     /// If `warp_pointer` is true, the mouse pointer will be moved to the window center.
     /// Use true for keyboard navigation, false for mouse-initiated focus changes.
     pub fn set_focus(&mut self, window: XWindow, warp_pointer: bool) -> Result<()> {
+        // Re-grab buttons on old focused window (for click-to-focus)
+        if let Some(old) = self.focused_window {
+            if old != window {
+                let _ = self.conn.grab_button(old);
+            }
+        }
+
         self.focused_window = Some(window);
         self.current_workspace_mut().focused = Some(window);
+
+        // Ungrab buttons on new focused window (allow clicks through)
+        let _ = self.conn.ungrab_button(window);
 
         // Update focus history - move window to front
         self.focus_history.retain(|&w| w != window);
