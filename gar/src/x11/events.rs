@@ -205,6 +205,14 @@ impl WindowManager {
         let window = event.window;
         tracing::debug!("MapRequest for window {}", window);
 
+        // Check for dock/desktop windows (polybar, etc.) - don't manage, just map
+        if self.conn.should_ignore(window) {
+            tracing::info!("Window {} is dock/desktop, mapping without managing", window);
+            self.conn.map_window(window)?;
+            self.conn.flush()?;
+            return Ok(());
+        }
+
         // Check if we should manage this window
         if !self.should_manage(window) {
             // Just map it without managing

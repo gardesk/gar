@@ -50,6 +50,8 @@ pub struct Connection {
     pub net_wm_window_type_toolbar: Atom,
     pub net_wm_window_type_splash: Atom,
     pub net_wm_window_type_notification: Atom,
+    pub net_wm_window_type_dock: Atom,
+    pub net_wm_window_type_desktop: Atom,
     // EWMH atoms for window state
     pub net_wm_state: Atom,
     pub net_wm_state_modal: Atom,
@@ -99,6 +101,8 @@ impl Connection {
         let net_wm_window_type_toolbar = conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_TOOLBAR")?.reply()?.atom;
         let net_wm_window_type_splash = conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_SPLASH")?.reply()?.atom;
         let net_wm_window_type_notification = conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_NOTIFICATION")?.reply()?.atom;
+        let net_wm_window_type_dock = conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DOCK")?.reply()?.atom;
+        let net_wm_window_type_desktop = conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DESKTOP")?.reply()?.atom;
 
         // Intern EWMH atoms for window state
         let net_wm_state = conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom;
@@ -145,6 +149,8 @@ impl Connection {
             net_wm_window_type_toolbar,
             net_wm_window_type_splash,
             net_wm_window_type_notification,
+            net_wm_window_type_dock,
+            net_wm_window_type_desktop,
             net_wm_state,
             net_wm_state_modal,
             net_wm_state_fullscreen,
@@ -548,6 +554,39 @@ impl Connection {
                         let atom = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                         if atom == self.net_wm_state_modal {
                             tracing::debug!("Window {} is modal, should float", window);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Check if a window should be ignored entirely (not managed by the WM).
+    /// Returns true for dock windows (status bars like polybar) and desktop windows.
+    pub fn should_ignore(&self, window: Window) -> bool {
+        // Check _NET_WM_WINDOW_TYPE for dock/desktop types
+        if let Ok(cookie) = self.conn.get_property(
+            false,
+            window,
+            self.net_wm_window_type,
+            AtomEnum::ATOM,
+            0,
+            32,
+        ) {
+            if let Ok(reply) = cookie.reply() {
+                if reply.type_ == u32::from(AtomEnum::ATOM) && reply.format == 32 {
+                    let ignore_types = [
+                        self.net_wm_window_type_dock,
+                        self.net_wm_window_type_desktop,
+                    ];
+
+                    for chunk in reply.value.chunks_exact(4) {
+                        let atom = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        if ignore_types.contains(&atom) {
+                            tracing::debug!("Window {} is dock/desktop type, ignoring", window);
                             return true;
                         }
                     }
