@@ -15,6 +15,7 @@ pub enum Action {
     Swap(String),
     Resize(String, f32),
     CloseWindow,
+    ForceCloseWindow,  // Force kill without asking nicely
     Workspace(usize),
     MoveToWorkspace(usize),
     Equalize,
@@ -265,6 +266,7 @@ impl LuaConfig {
                     if let Ok(action_type) = t.get::<String>("action") {
                         match action_type.as_str() {
                             "close_window" => Action::CloseWindow,
+                            "force_close_window" => Action::ForceCloseWindow,
                             "reload" => Action::Reload,
                             "exit" => Action::Exit,
                             "equalize" => Action::Equalize,
@@ -398,6 +400,11 @@ impl LuaConfig {
         let close_window = self.lua.create_table()?;
         close_window.set("action", "close_window")?;
         gar.set("close_window", close_window)?;
+
+        // gar.force_close_window - force kill without asking nicely
+        let force_close = self.lua.create_table()?;
+        force_close.set("action", "force_close_window")?;
+        gar.set("force_close_window", force_close)?;
 
         // gar.reload
         let reload = self.lua.create_table()?;
@@ -547,6 +554,18 @@ fn parse_keyspec(spec: &str) -> Option<(ModMask, u32)> {
         "f10" => 0xffc7,
         "f11" => 0xffc8,
         "f12" => 0xffc9,
+        // Punctuation
+        "comma" => 0x2c,
+        "period" => 0x2e,
+        "semicolon" => 0x3b,
+        "apostrophe" => 0x27,
+        "bracketleft" => 0x5b,
+        "bracketright" => 0x5d,
+        "backslash" => 0x5c,
+        "slash" => 0x2f,
+        "minus" => 0x2d,
+        "equal" => 0x3d,
+        "grave" => 0x60,
         // Numbers
         "0" => 0x30,
         "1" => 0x31,
