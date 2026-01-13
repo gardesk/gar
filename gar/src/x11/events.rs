@@ -1,6 +1,76 @@
 use std::process::Command;
 
 use x11rb::connection::Connection as X11Connection;
+
+/// Reap any zombie child processes to prevent accumulation.
+/// Called periodically from the event loop.
+fn reap_zombies() {
+    unsafe {
+        // WNOHANG = 1, reap any child without blocking
+        while libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) > 0 {}
+    }
+}
+
+/// Signal systemd that the graphical session has started.
+/// This allows user services bound to graphical-session.target to start.
+fn start_graphical_session() {
+    // Import DISPLAY so user services can connect to X
+    if let Ok(display_val) = std::env::var("DISPLAY") {
+        match Command::new("systemctl")
+            .args(["--user", "import-environment", "DISPLAY", "XAUTHORITY"])
+            .output()
+        {
+            Ok(output) => {
+                if output.status.success() {
+                    tracing::info!("Imported DISPLAY={} to systemd user session", display_val);
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    tracing::error!("Failed to import DISPLAY: {}", stderr);
+                }
+            }
+            Err(e) => tracing::error!("Failed to run systemctl import-environment: {}", e),
+        }
+    } else {
+        tracing::warn!("DISPLAY not set, skipping systemd import");
+    }
+
+    // Start graphical-session.target
+    match Command::new("systemctl")
+        .args(["--user", "start", "graphical-session.target"])
+        .output()
+    {
+        Ok(output) => {
+            if output.status.success() {
+                tracing::info!("Started graphical-session.target");
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::error!("Failed to start graphical-session.target: {}", stderr);
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to run systemctl start graphical-session.target: {}", e);
+        }
+    }
+}
+
+/// Signal systemd that the graphical session has ended.
+/// This stops user services bound to graphical-session.target.
+fn stop_graphical_session() {
+    match Command::new("systemctl")
+        .args(["--user", "stop", "graphical-session.target"])
+        .status()
+    {
+        Ok(status) if status.success() => {
+            tracing::info!("Stopped graphical-session.target");
+        }
+        Ok(_) => {
+            tracing::debug!("graphical-session.target was not running");
+        }
+        Err(e) => {
+            tracing::warn!("Failed to stop graphical-session.target: {}", e);
+        }
+    }
+}
 use x11rb::protocol::xproto::{
     ButtonPressEvent, ButtonReleaseEvent, ClientMessageEvent, ConfigureRequestEvent,
     ConfigureWindowAux, ConnectionExt, DestroyNotifyEvent, EnterNotifyEvent, EventMask,
@@ -1493,6 +1563,10 @@ impl WindowManager {
         // Adopt any existing windows
         self.adopt_existing_windows()?;
 
+        // Signal systemd that graphical session has started
+        // This allows user services (like garbg) bound to graphical-session.target to start
+        start_graphical_session();
+
         while self.running {
             // Handle X11 events (non-blocking poll)
             while let Some(event) = self.conn.conn.poll_for_event()? {
@@ -1505,9 +1579,16 @@ impl WindowManager {
             // Handle i3-compatible IPC requests (for polybar)
             self.handle_i3_ipc()?;
 
+            // Reap any zombie child processes (from exec/exec_once)
+            reap_zombies();
+
             // Small sleep to avoid busy-waiting when idle
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+
+        // Signal systemd that graphical session has ended
+        // This stops user services bound to graphical-session.target (like garbg)
+        stop_graphical_session();
 
         tracing::info!("Event loop exited");
         Ok(())
@@ -2254,14 +2335,24 @@ impl WindowManager {
         use crate::ipc::i3_server::build_workspace_event_json;
 
         let workspaces = self.build_i3_workspaces();
-        let current = workspaces.get(workspace_idx).cloned();
-        let old = old_workspace_idx.and_then(|idx| workspaces.get(idx).cloned());
+
+        // Find workspace by num (workspace_idx + 1), not by array index
+        // build_i3_workspaces filters out empty/invisible workspaces so indices don't match
+        let workspace_num = (workspace_idx + 1) as i32;
+        let current = workspaces.iter().find(|w| w.num == workspace_num).cloned();
+        let old = old_workspace_idx.and_then(|idx| {
+            let old_num = (idx + 1) as i32;
+            workspaces.iter().find(|w| w.num == old_num).cloned()
+        });
 
         if let Some(current) = current {
             let json = build_workspace_event_json(change, &current, old.as_ref());
+            tracing::debug!("Broadcasting i3 workspace event: change={}, workspace={}", change, current.num);
             if let Some(ref mut i3_ipc) = self.i3_ipc_server {
                 i3_ipc.broadcast_workspace_event(&json);
             }
+        } else {
+            tracing::warn!("Could not find workspace {} in i3 workspace list for broadcast", workspace_num);
         }
     }
 
