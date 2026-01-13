@@ -35,6 +35,43 @@ gar.set("gap_outer", 8)
 -- gar.set("fade_enabled", true)
 -- gar.set("fade_delta", 10)
 
+-- Title bars (disabled by default)
+-- gar.set("titlebar_enabled", true)
+-- gar.set("titlebar_height", 20)
+-- gar.set("titlebar_color_focused", "#3d3d3d")
+-- gar.set("titlebar_color_unfocused", "#2d2d2d")
+-- gar.set("titlebar_text_color", "#ffffff")
+
+-- Border gradients (requires frame windows, disabled by default)
+-- gar.set("border_gradient_enabled", true)
+-- gar.set("border_gradient_start_focused", "#5294e2")
+-- gar.set("border_gradient_end_focused", "#1a5fb4")
+-- gar.set("border_gradient_start_unfocused", "#3d3d3d")
+-- gar.set("border_gradient_end_unfocused", "#1d1d1d")
+-- gar.set("border_gradient_direction", "vertical")  -- "vertical", "horizontal", "diagonal"
+
+-- Animations (picom v12+)
+-- open options: "slide-in", "fly-in", "appear", "none"
+-- close options: "slide-out", "fly-out", "disappear", "none"
+-- gar.set("animation_open", "fly-in")
+-- gar.set("animation_close", "fly-out")
+-- gar.set("animation_duration", 0.2)      -- seconds
+
+-- Custom GLSL shader (picom, requires GLX backend)
+-- gar.set("picom_shader", "~/.config/gar/shaders/focused-glow.glsl")
+
+-- Per-window picom rules (examples)
+-- gar.picom_rule({
+--     match = "class_g = 'Firefox'",
+--     corner_radius = 8,
+--     opacity = 0.95,
+-- })
+-- gar.picom_rule({
+--     match = "class_g = 'Alacritty'",
+--     blur_background = true,
+--     opacity = 0.9,
+-- })
+
 -- Behavior
 gar.set("follow_window_on_move", true)  -- Follow window when using Mod+Shift+number
 

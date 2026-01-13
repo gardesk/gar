@@ -1,7 +1,7 @@
-//! Frame window management for title bars.
+//! Frame window management for title bars and gradient borders.
 //!
-//! When title bars are enabled, client windows are reparented into frame windows.
-//! The frame handles the title bar drawing and the client sits below it.
+//! When title bars or gradient borders are enabled, client windows are reparented into frame windows.
+//! The frame handles the title bar drawing, gradient border rendering, and the client sits below/inside it.
 
 use std::collections::HashMap;
 
@@ -130,11 +130,15 @@ impl FrameManager {
         if let Some(frame) = self.client_to_frame.remove(&client) {
             self.frame_to_client.remove(&frame);
 
-            // Reparent client back to root
-            conn.reparent_window(client, root, 0, 0)?;
+            // Unmap frame first to prevent visual flash of empty frame background
+            let _ = conn.unmap_window(frame);
+
+            // Reparent client back to root (may fail if client was already destroyed)
+            // Ignore errors since the client might already be gone
+            let _ = conn.reparent_window(client, root, 0, 0);
 
             // Destroy the frame window
-            conn.destroy_window(frame)?;
+            let _ = conn.destroy_window(frame);
 
             tracing::debug!("Destroyed frame {} for client {}", frame, client);
         }
@@ -281,6 +285,346 @@ impl FrameManager {
     pub fn all_frames(&self) -> impl Iterator<Item = Window> + '_ {
         self.frame_to_client.keys().copied()
     }
+
+    /// Draw a gradient border around the frame.
+    /// This draws the border area of the frame with a color gradient.
+    /// The `direction` can be "vertical", "horizontal", or "diagonal".
+    pub fn draw_gradient_border<C: X11Connection>(
+        &mut self,
+        conn: &C,
+        client: Window,
+        width: u16,
+        height: u16,
+        border_width: u16,
+        start_color: u32,
+        end_color: u32,
+        direction: &str,
+    ) -> Result<(), Error> {
+        let Some(&frame) = self.client_to_frame.get(&client) else {
+            return Ok(());
+        };
+
+        if border_width == 0 {
+            return Ok(());
+        }
+
+        // Ensure we have a GC
+        let gc = match self.gc {
+            Some(gc) => gc,
+            None => {
+                let gc = conn.generate_id()?;
+                let aux = CreateGCAux::new().foreground(start_color);
+                conn.create_gc(gc, frame, &aux)?;
+                self.gc = Some(gc);
+                gc
+            }
+        };
+
+        // Number of gradient steps for smooth appearance
+        let steps: u16 = 32.min(border_width * 2);
+
+        match direction {
+            "vertical" => {
+                // Draw gradient from top to bottom across the border areas
+                // We draw along the sides
+                let step_height = height / steps;
+                for i in 0..steps {
+                    let t = i as f32 / (steps - 1).max(1) as f32;
+                    let color = interpolate_color(start_color, end_color, t);
+                    conn.change_gc(gc, &x11rb::protocol::xproto::ChangeGCAux::new().foreground(color))?;
+
+                    let y = (i * step_height) as i16;
+                    let seg_height = step_height.min(height.saturating_sub(i * step_height));
+
+                    // Left border strip
+                    let left_rect = Rectangle {
+                        x: 0,
+                        y,
+                        width: border_width,
+                        height: seg_height,
+                    };
+                    // Right border strip
+                    let right_rect = Rectangle {
+                        x: (width - border_width) as i16,
+                        y,
+                        width: border_width,
+                        height: seg_height,
+                    };
+                    conn.poly_fill_rectangle(frame, gc, &[left_rect, right_rect])?;
+                }
+
+                // Top and bottom borders (full width gradient)
+                let step_width = width / steps;
+                for i in 0..steps {
+                    let t = i as f32 / (steps - 1).max(1) as f32;
+                    let color = interpolate_color(start_color, end_color, t);
+                    conn.change_gc(gc, &x11rb::protocol::xproto::ChangeGCAux::new().foreground(color))?;
+
+                    let x = (i * step_width) as i16;
+                    let seg_width = step_width.min(width.saturating_sub(i * step_width));
+
+                    // Top border strip
+                    let top_rect = Rectangle {
+                        x,
+                        y: 0,
+                        width: seg_width,
+                        height: border_width,
+                    };
+                    // Bottom border strip
+                    let bottom_rect = Rectangle {
+                        x,
+                        y: (height - border_width) as i16,
+                        width: seg_width,
+                        height: border_width,
+                    };
+                    conn.poly_fill_rectangle(frame, gc, &[top_rect, bottom_rect])?;
+                }
+            }
+            "horizontal" => {
+                // Draw gradient from left to right across all border areas
+                let step_width = width / steps;
+                for i in 0..steps {
+                    let t = i as f32 / (steps - 1).max(1) as f32;
+                    let color = interpolate_color(start_color, end_color, t);
+                    conn.change_gc(gc, &x11rb::protocol::xproto::ChangeGCAux::new().foreground(color))?;
+
+                    let x = (i * step_width) as i16;
+                    let seg_width = step_width.min(width.saturating_sub(i * step_width));
+
+                    // Top border
+                    let top_rect = Rectangle {
+                        x,
+                        y: 0,
+                        width: seg_width,
+                        height: border_width,
+                    };
+                    // Bottom border
+                    let bottom_rect = Rectangle {
+                        x,
+                        y: (height - border_width) as i16,
+                        width: seg_width,
+                        height: border_width,
+                    };
+                    conn.poly_fill_rectangle(frame, gc, &[top_rect, bottom_rect])?;
+                }
+
+                // Side borders
+                let step_height = height / steps;
+                for i in 0..steps {
+                    let t = i as f32 / (steps - 1).max(1) as f32;
+                    let color = interpolate_color(start_color, end_color, t);
+                    conn.change_gc(gc, &x11rb::protocol::xproto::ChangeGCAux::new().foreground(color))?;
+
+                    let y = (i * step_height) as i16;
+                    let seg_height = step_height.min(height.saturating_sub(i * step_height));
+
+                    // Left border
+                    let left_rect = Rectangle {
+                        x: 0,
+                        y,
+                        width: border_width,
+                        height: seg_height,
+                    };
+                    // Right border
+                    let right_rect = Rectangle {
+                        x: (width - border_width) as i16,
+                        y,
+                        width: border_width,
+                        height: seg_height,
+                    };
+                    conn.poly_fill_rectangle(frame, gc, &[left_rect, right_rect])?;
+                }
+            }
+            "diagonal" | _ => {
+                // Draw a diagonal gradient (top-left to bottom-right)
+                // We approximate by using the sum of x+y position
+                let max_dist = (width + height) as f32;
+
+                // Draw borders with diagonal gradient
+                // Top border
+                for x in 0..width {
+                    let t = x as f32 / max_dist;
+                    let color = interpolate_color(start_color, end_color, t);
+                    conn.change_gc(gc, &x11rb::protocol::xproto::ChangeGCAux::new().foreground(color))?;
+                    let rect = Rectangle {
+                        x: x as i16,
+                        y: 0,
+                        width: 1,
+                        height: border_width,
+                    };
+                    conn.poly_fill_rectangle(frame, gc, &[rect])?;
+                }
+                // Bottom border
+                for x in 0..width {
+                    let t = (x as f32 + (height - border_width) as f32) / max_dist;
+                    let color = interpolate_color(start_color, end_color, t.min(1.0));
+                    conn.change_gc(gc, &x11rb::protocol::xproto::ChangeGCAux::new().foreground(color))?;
+                    let rect = Rectangle {
+                        x: x as i16,
+                        y: (height - border_width) as i16,
+                        width: 1,
+                        height: border_width,
+                    };
+                    conn.poly_fill_rectangle(frame, gc, &[rect])?;
+                }
+                // Left border
+                for y in border_width..(height - border_width) {
+                    let t = y as f32 / max_dist;
+                    let color = interpolate_color(start_color, end_color, t);
+                    conn.change_gc(gc, &x11rb::protocol::xproto::ChangeGCAux::new().foreground(color))?;
+                    let rect = Rectangle {
+                        x: 0,
+                        y: y as i16,
+                        width: border_width,
+                        height: 1,
+                    };
+                    conn.poly_fill_rectangle(frame, gc, &[rect])?;
+                }
+                // Right border
+                for y in border_width..(height - border_width) {
+                    let t = ((width - border_width) as f32 + y as f32) / max_dist;
+                    let color = interpolate_color(start_color, end_color, t.min(1.0));
+                    conn.change_gc(gc, &x11rb::protocol::xproto::ChangeGCAux::new().foreground(color))?;
+                    let rect = Rectangle {
+                        x: (width - border_width) as i16,
+                        y: y as i16,
+                        width: border_width,
+                        height: 1,
+                    };
+                    conn.poly_fill_rectangle(frame, gc, &[rect])?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Create a border frame (frame without titlebar, just for gradient borders).
+    /// The frame acts as a border container with the client centered inside.
+    pub fn create_border_frame<C: X11Connection>(
+        &mut self,
+        conn: &C,
+        root: Window,
+        client: Window,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+        border_width: u16,
+        bg_color: u32,
+    ) -> Result<Window, Error> {
+        // Frame size includes the border on all sides
+        let frame_width = width + border_width * 2;
+        let frame_height = height + border_width * 2;
+
+        // Generate a new window ID for the frame
+        let frame = conn.generate_id()?;
+
+        // Create the frame window with no X11 border (we draw our own)
+        let aux = CreateWindowAux::new()
+            .event_mask(
+                EventMask::SUBSTRUCTURE_REDIRECT
+                    | EventMask::SUBSTRUCTURE_NOTIFY
+                    | EventMask::BUTTON_PRESS
+                    | EventMask::BUTTON_RELEASE
+                    | EventMask::ENTER_WINDOW
+                    | EventMask::EXPOSURE,
+            )
+            .background_pixel(bg_color)
+            .border_pixel(0);
+
+        conn.create_window(
+            COPY_DEPTH_FROM_PARENT,
+            frame,
+            root,
+            x,
+            y,
+            frame_width,
+            frame_height,
+            0, // No X11 border - we draw gradients ourselves
+            WindowClass::INPUT_OUTPUT,
+            0, // CopyFromParent visual
+            &aux,
+        )?;
+
+        // Reparent the client window into the frame, inset by border_width
+        conn.reparent_window(client, frame, border_width as i16, border_width as i16)?;
+
+        // Configure the client to fill the center of the frame
+        let client_aux = ConfigureWindowAux::new()
+            .x(border_width as i32)
+            .y(border_width as i32)
+            .width(width as u32)
+            .height(height as u32)
+            .border_width(0);
+        conn.configure_window(client, &client_aux)?;
+
+        // Track the mapping
+        self.client_to_frame.insert(client, frame);
+        self.frame_to_client.insert(frame, client);
+
+        tracing::debug!(
+            "Created border frame {} for client {} at ({}, {}) size {}x{} (border: {})",
+            frame, client, x, y, frame_width, frame_height, border_width
+        );
+
+        Ok(frame)
+    }
+
+    /// Configure a border frame's geometry.
+    pub fn configure_border_frame<C: X11Connection>(
+        &self,
+        conn: &C,
+        client: Window,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+        border_width: u16,
+    ) -> Result<(), Error> {
+        if let Some(&frame) = self.client_to_frame.get(&client) {
+            let frame_width = width + border_width * 2;
+            let frame_height = height + border_width * 2;
+
+            // Configure frame position and size
+            let frame_aux = ConfigureWindowAux::new()
+                .x(x as i32)
+                .y(y as i32)
+                .width(frame_width as u32)
+                .height(frame_height as u32)
+                .border_width(0);
+            conn.configure_window(frame, &frame_aux)?;
+
+            // Configure client within frame
+            let client_aux = ConfigureWindowAux::new()
+                .x(border_width as i32)
+                .y(border_width as i32)
+                .width(width as u32)
+                .height(height as u32);
+            conn.configure_window(client, &client_aux)?;
+        }
+        Ok(())
+    }
+}
+
+/// Interpolate between two colors.
+/// t should be in range 0.0 to 1.0.
+fn interpolate_color(c1: u32, c2: u32, t: f32) -> u32 {
+    let t = t.clamp(0.0, 1.0);
+
+    let r1 = ((c1 >> 16) & 0xFF) as f32;
+    let g1 = ((c1 >> 8) & 0xFF) as f32;
+    let b1 = (c1 & 0xFF) as f32;
+
+    let r2 = ((c2 >> 16) & 0xFF) as f32;
+    let g2 = ((c2 >> 8) & 0xFF) as f32;
+    let b2 = (c2 & 0xFF) as f32;
+
+    let r = (r1 + (r2 - r1) * t) as u32;
+    let g = (g1 + (g2 - g1) * t) as u32;
+    let b = (b1 + (b2 - b1) * t) as u32;
+
+    (r << 16) | (g << 8) | b
 }
 
 impl Default for FrameManager {

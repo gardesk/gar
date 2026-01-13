@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use mlua::{Function, Lua, Result as LuaResult, Table, Value};
 use x11rb::protocol::xproto::ModMask;
 
-use super::Config;
+use super::{Config, PicomRule};
 
 /// Actions that can be triggered by keybinds
 #[derive(Debug, Clone)]
@@ -188,6 +188,9 @@ impl LuaConfig {
         // gar.rule(match, actions)
         self.register_rule(&gar)?;
 
+        // gar.picom_rule(table) - per-window picom rules
+        self.register_picom_rule(&gar)?;
+
         // Built-in action functions
         self.register_actions(&gar)?;
 
@@ -362,6 +365,90 @@ impl LuaConfig {
                         state.config.fade_delta = v as u32;
                     }
                 }
+                // Border gradient settings
+                "border_gradient_enabled" => {
+                    if let Value::Boolean(v) = value {
+                        state.config.border_gradient_enabled = v;
+                    }
+                }
+                "border_gradient_start_focused" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            if let Some(color) = parse_color(&str_val) {
+                                state.config.border_gradient_start_focused = color;
+                            }
+                        }
+                    }
+                }
+                "border_gradient_end_focused" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            if let Some(color) = parse_color(&str_val) {
+                                state.config.border_gradient_end_focused = color;
+                            }
+                        }
+                    }
+                }
+                "border_gradient_start_unfocused" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            if let Some(color) = parse_color(&str_val) {
+                                state.config.border_gradient_start_unfocused = color;
+                            }
+                        }
+                    }
+                }
+                "border_gradient_end_unfocused" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            if let Some(color) = parse_color(&str_val) {
+                                state.config.border_gradient_end_unfocused = color;
+                            }
+                        }
+                    }
+                }
+                "border_gradient_direction" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            state.config.border_gradient_direction = str_val.to_string();
+                        }
+                    }
+                }
+                // Animation settings
+                "animation_open" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            state.config.animation_open = str_val.to_string();
+                        }
+                    }
+                }
+                "animation_close" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            state.config.animation_close = str_val.to_string();
+                        }
+                    }
+                }
+                "animation_duration" => {
+                    if let Value::Number(v) = value {
+                        state.config.animation_duration = v;
+                    }
+                }
+                "animation_curve" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            state.config.animation_curve = str_val.to_string();
+                        }
+                    }
+                }
+                // Shader settings
+                "picom_shader" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            state.config.picom_shader = Some(str_val.to_string());
+                        }
+                    }
+                }
                 _ => {
                     tracing::warn!("Unknown config key: {}", key);
                 }
@@ -528,6 +615,53 @@ impl LuaConfig {
             Ok(())
         })?;
         gar.set("rule", rule_fn)
+    }
+
+    fn register_picom_rule(&self, gar: &Table) -> LuaResult<()> {
+        let state = Arc::clone(&self.state);
+        // gar.picom_rule({ match = "...", corner_radius = 8, opacity = 0.9, ... })
+        let picom_rule_fn = self.lua.create_function(move |_, table: Table| {
+            let mut rule = PicomRule::default();
+
+            // Required: match expression
+            if let Ok(match_expr) = table.get::<String>("match") {
+                rule.match_expr = match_expr;
+            } else {
+                tracing::warn!("picom_rule: missing 'match' field");
+                return Ok(());
+            }
+
+            // Optional: corner_radius
+            if let Ok(cr) = table.get::<u32>("corner_radius") {
+                rule.corner_radius = Some(cr);
+            }
+
+            // Optional: opacity
+            if let Ok(op) = table.get::<f64>("opacity") {
+                rule.opacity = Some(op);
+            }
+
+            // Optional: shadow
+            if let Ok(shadow) = table.get::<bool>("shadow") {
+                rule.shadow = Some(shadow);
+            }
+
+            // Optional: blur_background
+            if let Ok(blur) = table.get::<bool>("blur_background") {
+                rule.blur_background = Some(blur);
+            }
+
+            // Optional: shader
+            if let Ok(shader) = table.get::<String>("shader") {
+                rule.shader = Some(shader);
+            }
+
+            tracing::debug!("Registered picom rule: {:?}", rule);
+            let mut state = state.lock().unwrap();
+            state.config.picom_rules.push(rule);
+            Ok(())
+        })?;
+        gar.set("picom_rule", picom_rule_fn)
     }
 
     fn register_actions(&self, gar: &Table) -> LuaResult<()> {

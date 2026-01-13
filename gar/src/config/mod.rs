@@ -2,6 +2,17 @@ mod lua;
 
 pub use lua::{Action, Keybind, LuaConfig, LuaState, RuleActions, WindowMatch, WindowRule};
 
+/// A per-window picom rule for customizing compositor effects per application
+#[derive(Debug, Clone, Default)]
+pub struct PicomRule {
+    pub match_expr: String,
+    pub corner_radius: Option<u32>,
+    pub opacity: Option<f64>,
+    pub shadow: Option<bool>,
+    pub blur_background: Option<bool>,
+    pub shader: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub border_width: u32,
@@ -36,6 +47,21 @@ pub struct Config {
     pub opacity_unfocused: f64,
     pub fade_enabled: bool,
     pub fade_delta: u32,
+    // Border gradient settings
+    pub border_gradient_enabled: bool,
+    pub border_gradient_start_focused: u32,
+    pub border_gradient_end_focused: u32,
+    pub border_gradient_start_unfocused: u32,
+    pub border_gradient_end_unfocused: u32,
+    pub border_gradient_direction: String,
+    // Animation settings
+    pub animation_open: String,
+    pub animation_close: String,
+    pub animation_duration: f64,
+    pub animation_curve: String,
+    // Shader and per-window rules
+    pub picom_shader: Option<String>,
+    pub picom_rules: Vec<PicomRule>,
 }
 
 impl Config {
@@ -56,7 +82,7 @@ blur-background-exclude = [
     "window_type = 'menu'",
     "window_type = 'dropdown_menu'",
     "window_type = 'popup_menu'",
-    "_NET_WM_BYPASS_COMPOSITOR@:32c = 1"
+    "_NET_WM_BYPASS_COMPOSITOR = 1"
 ];"#,
                 self.blur_method, self.blur_strength
             )
@@ -80,8 +106,8 @@ shadow-exclude = [
     "window_type = 'dropdown_menu'",
     "window_type = 'popup_menu'",
     "window_type = 'tooltip'",
-    "_NET_WM_STATE@:32a *= '_NET_WM_STATE_FULLSCREEN'",
-    "_NET_WM_BYPASS_COMPOSITOR@:32c = 1"
+    "_NET_WM_STATE *= '_NET_WM_STATE_FULLSCREEN'",
+    "_NET_WM_BYPASS_COMPOSITOR = 1"
 ];"#,
                 self.shadow_radius,
                 self.shadow_opacity,
@@ -125,6 +151,94 @@ frame-opacity = 1.0;"#,
             "# Focus opacity: all windows fully opaque".to_string()
         };
 
+        // Animation section - only generate if using valid picom v12 presets
+        // Valid presets: slide-in, slide-out, fly-in, fly-out, appear, disappear
+        let valid_presets = ["slide-in", "slide-out", "fly-in", "fly-out", "appear", "disappear"];
+        let open_valid = valid_presets.contains(&self.animation_open.as_str());
+        let close_valid = valid_presets.contains(&self.animation_close.as_str());
+
+        let animation_section = if open_valid || close_valid {
+            let open_preset = if open_valid { &self.animation_open } else { "appear" };
+            let close_preset = if close_valid { &self.animation_close } else { "disappear" };
+            format!(
+                r#"# Animations
+animations = ({{
+    triggers = ["open", "show"];
+    preset = "{}";
+    duration = {:.2};
+}},
+{{
+    triggers = ["close", "hide"];
+    preset = "{}";
+    duration = {:.2};
+}},
+{{
+    triggers = ["geometry"];
+    preset = "geometry-change";
+    duration = {:.2};
+}});"#,
+                open_preset, self.animation_duration,
+                close_preset, self.animation_duration,
+                self.animation_duration * 0.5
+            )
+        } else {
+            "# Animations disabled".to_string()
+        };
+
+        // Global shader section
+        let shader_section = if let Some(ref shader) = self.picom_shader {
+            // Expand ~ to home directory
+            let expanded = if shader.starts_with("~/") {
+                if let Some(home) = dirs::home_dir() {
+                    home.join(&shader[2..]).to_string_lossy().to_string()
+                } else {
+                    shader.clone()
+                }
+            } else {
+                shader.clone()
+            };
+            format!("# Custom Shader\nwindow-shader-fg = \"{}\";", expanded)
+        } else {
+            "# No custom shader".to_string()
+        };
+
+        // Per-window rules section
+        let rules_section = if !self.picom_rules.is_empty() {
+            let mut rules = String::from("# Per-window Rules\nrules = (\n");
+            for rule in &self.picom_rules {
+                rules.push_str(&format!("    {{\n        match = \"{}\";\n", rule.match_expr));
+                if let Some(cr) = rule.corner_radius {
+                    rules.push_str(&format!("        corner-radius = {};\n", cr));
+                }
+                if let Some(opacity) = rule.opacity {
+                    rules.push_str(&format!("        opacity = {:.2};\n", opacity));
+                }
+                if let Some(shadow) = rule.shadow {
+                    rules.push_str(&format!("        shadow = {};\n", shadow));
+                }
+                if let Some(blur) = rule.blur_background {
+                    rules.push_str(&format!("        blur-background = {};\n", blur));
+                }
+                if let Some(ref shader) = rule.shader {
+                    let expanded = if shader.starts_with("~/") {
+                        if let Some(home) = dirs::home_dir() {
+                            home.join(&shader[2..]).to_string_lossy().to_string()
+                        } else {
+                            shader.clone()
+                        }
+                    } else {
+                        shader.clone()
+                    };
+                    rules.push_str(&format!("        shader = \"{}\";\n", expanded));
+                }
+                rules.push_str("    },\n");
+            }
+            rules.push_str(");");
+            rules
+        } else {
+            "# No per-window rules".to_string()
+        };
+
         format!(
             r#"# picom.conf - Auto-generated by gar window manager
 # DO NOT EDIT MANUALLY - changes will be overwritten on reload
@@ -147,8 +261,14 @@ rounded-corners-exclude = [
     "window_type = 'menu'",
     "window_type = 'dropdown_menu'",
     "window_type = 'popup_menu'",
-    "_NET_WM_STATE@:32a *= '_NET_WM_STATE_FULLSCREEN'"
+    "_NET_WM_STATE *= '_NET_WM_STATE_FULLSCREEN'"
 ];
+
+{}
+
+{}
+
+{}
 
 {}
 
@@ -189,7 +309,10 @@ wintypes:
             blur_section,
             shadow_section,
             fade_section,
-            opacity_section
+            opacity_section,
+            animation_section,
+            shader_section,
+            rules_section
         )
     }
 
@@ -296,6 +419,21 @@ impl Default for Config {
             opacity_unfocused: 1.0, // No unfocused dimming by default
             fade_enabled: true,
             fade_delta: 10,
+            // Border gradients disabled by default
+            border_gradient_enabled: false,
+            border_gradient_start_focused: 0x5294e2,
+            border_gradient_end_focused: 0x1a5fb4,
+            border_gradient_start_unfocused: 0x3d3d3d,
+            border_gradient_end_unfocused: 0x1d1d1d,
+            border_gradient_direction: "vertical".to_string(),
+            // Animations disabled by default
+            animation_open: "none".to_string(),
+            animation_close: "none".to_string(),
+            animation_duration: 0.2,
+            animation_curve: "ease-out".to_string(),
+            // No global shader by default
+            picom_shader: None,
+            picom_rules: Vec::new(),
         }
     }
 }

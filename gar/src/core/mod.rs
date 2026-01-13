@@ -364,8 +364,12 @@ impl WindowManager {
 
     /// Create a frame for a window if title bars are enabled.
     /// Returns the frame window ID if created.
+    /// NOTE: Gradient borders via frames are disabled due to lifecycle issues.
+    /// Gradient support requires a different approach (compositor shaders or similar).
     pub fn create_frame_for_window(&mut self, window: XWindow) -> Option<XWindow> {
-        if !self.config.titlebar_enabled {
+        let needs_titlebar = self.config.titlebar_enabled;
+
+        if !needs_titlebar {
             return None;
         }
 
@@ -374,6 +378,7 @@ impl WindowManager {
 
         // Create frame with initial geometry (will be updated by apply_layout)
         let screen = self.screen_rect();
+
         let frame = match self.frames.create_frame(
             &self.conn.conn,
             self.conn.root,
@@ -643,16 +648,19 @@ impl WindowManager {
                     .map(|w| w.urgent && Some(window) != focused)
                     .unwrap_or(false);
 
+                let is_focused = Some(window) == focused;
+
                 let color = if is_urgent {
                     urgent_color
-                } else if Some(window) == focused {
+                } else if is_focused {
                     focused_color
                 } else {
                     unfocused_color
                 };
 
-                // If window has a frame, set border on the frame instead
-                if self.windows.get(&window).and_then(|w| w.frame).is_some() {
+                // If window has a frame, handle border on the frame
+                // NOTE: Gradient borders disabled - using solid colors only
+                if let Some(_frame) = self.windows.get(&window).and_then(|w| w.frame) {
                     self.frames.set_frame_border(&self.conn.conn, window, color)?;
                 } else {
                     self.conn.set_border(window, border_width, color)?;
