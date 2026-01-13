@@ -508,11 +508,8 @@ impl WindowManager {
         self.current_workspace_mut().focused = Some(window);
 
         // Ungrab buttons on new focused window (allow clicks through)
-        // But keep grabs on floating windows so we can detect edge resize clicks
-        let is_floating = self.windows.get(&window).map_or(false, |w| w.floating);
-        if !is_floating {
-            let _ = self.conn.ungrab_button(window);
-        }
+        // Edge resize detection uses POINTER_MOTION events, not button grabs
+        let _ = self.conn.ungrab_button(window);
 
         // Update focus history - move window to front
         self.focus_history.retain(|&w| w != window);

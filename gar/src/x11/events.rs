@@ -233,10 +233,6 @@ impl WindowManager {
             // Focus the first window
             if let Some(window) = self.focused_window {
                 self.set_focus(window, true)?;
-                // Ungrab button for click-through (unless floating - keep for edge resize)
-                if !self.is_floating(window) {
-                    self.conn.ungrab_button(window)?;
-                }
             }
             tracing::info!("Adopted {} existing windows", adopted);
         }
@@ -774,20 +770,9 @@ impl WindowManager {
 
         tracing::debug!("Focus follows mouse: focusing window {}", window);
 
-        // Regrab button on old focused window (unless floating - keep for edge resize)
-        if let Some(old) = self.focused_window {
-            if !self.is_floating(old) {
-                self.conn.grab_button(old)?;
-            }
-        }
-
         // Focus the new window (no warp - mouse enter)
+        // set_focus handles grab/ungrab for old and new windows
         self.set_focus(window, false)?;
-
-        // Ungrab button for click-through (unless floating - keep for edge resize)
-        if !self.is_floating(window) {
-            self.conn.ungrab_button(window)?;
-        }
 
         // Raise floating windows on focus
         if self.is_floating(window) {
@@ -1130,12 +1115,9 @@ impl WindowManager {
         let geometries = self.current_workspace().tree.calculate_geometries(screen);
 
         if let Some(target) = Node::find_adjacent(&geometries, focused, direction) {
-            // Regrab button on old window
-            self.conn.grab_button(focused)?;
-
             // Focus new window (keyboard navigation, warp pointer)
+            // set_focus handles grab/ungrab for old and new windows
             self.set_focus(target, true)?;
-            self.conn.ungrab_button(target)?;
             self.conn.flush()?;
 
             tracing::debug!("Focused {:?} to window {}", direction, target);
@@ -1185,17 +1167,8 @@ impl WindowManager {
             .or_else(|| self.workspaces[workspace_idx].floating.last().copied())
             .or_else(|| self.workspaces[workspace_idx].tree.first_window())
         {
-            // Regrab on old window (unless floating)
-            if let Some(old) = self.focused_window {
-                if !self.is_floating(old) {
-                    self.conn.grab_button(old)?;
-                }
-            }
+            // set_focus handles grab/ungrab for old and new windows
             self.set_focus(window, true)?;
-            // Ungrab on new window (unless floating - keep for edge resize)
-            if !self.is_floating(window) {
-                self.conn.ungrab_button(window)?;
-            }
         } else {
             // No windows on target monitor - clear focus and warp to monitor center
             self.focused_window = None;
@@ -1271,10 +1244,65 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Execute an i3-compatible command (from IPC RUN_COMMAND).
+    /// Returns true if the command was executed successfully.
+    fn execute_i3_command(&mut self, cmd: &str) -> bool {
+        let cmd = cmd.trim();
+        tracing::debug!("Executing i3 command: {}", cmd);
+
+        // Parse "workspace <name|number>" command
+        // Use switch_workspace_impl with warp_pointer=false since IPC commands
+        // (like clicks from the bar) shouldn't move the mouse cursor
+        if let Some(rest) = cmd.strip_prefix("workspace ") {
+            let rest = rest.trim();
+            // Try to parse as number first
+            if let Ok(num) = rest.parse::<usize>() {
+                // Workspace numbers are 1-indexed in i3
+                let idx = num.saturating_sub(1);
+                if idx < self.workspaces.len() {
+                    if let Err(e) = self.switch_workspace_impl(idx, false) {
+                        tracing::warn!("Failed to switch workspace: {}", e);
+                        return false;
+                    }
+                    return true;
+                }
+            }
+            // Try to match by name
+            if let Some(idx) = self.workspaces.iter().position(|ws| ws.name == rest) {
+                if let Err(e) = self.switch_workspace_impl(idx, false) {
+                    tracing::warn!("Failed to switch workspace: {}", e);
+                    return false;
+                }
+                return true;
+            }
+            tracing::warn!("Workspace not found: {}", rest);
+            return false;
+        }
+
+        // Parse "workspace number <n>" command
+        if let Some(rest) = cmd.strip_prefix("workspace number ") {
+            if let Ok(num) = rest.trim().parse::<usize>() {
+                let idx = num.saturating_sub(1);
+                if idx < self.workspaces.len() {
+                    if let Err(e) = self.switch_workspace_impl(idx, false) {
+                        tracing::warn!("Failed to switch workspace: {}", e);
+                        return false;
+                    }
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        tracing::debug!("Unknown i3 command: {}", cmd);
+        false
+    }
+
     /// Switch to workspace using i3-style behavior:
     /// - If workspace is visible on another monitor, focus moves to that monitor
     /// - If workspace is not visible, it appears on the current monitor
-    fn switch_workspace(&mut self, idx: usize) -> Result<()> {
+    /// If warp_pointer is false, the mouse cursor is not moved (for IPC commands).
+    fn switch_workspace_impl(&mut self, idx: usize, warp_pointer: bool) -> Result<()> {
         if idx >= self.workspaces.len() {
             return Ok(());
         }
@@ -1304,19 +1332,21 @@ impl WindowManager {
             // Update EWMH
             self.conn.set_current_desktop(idx as u32)?;
 
-            // Warp pointer to that monitor
-            let monitor_geom = self.monitors[monitor_idx].geometry;
-            let center_x = monitor_geom.x + (monitor_geom.width as i16 / 2);
-            let center_y = monitor_geom.y + (monitor_geom.height as i16 / 2);
-            self.conn.warp_pointer(center_x, center_y)?;
-            self.last_warp = std::time::Instant::now();
+            // Warp pointer to that monitor (only if requested)
+            if warp_pointer {
+                let monitor_geom = self.monitors[monitor_idx].geometry;
+                let center_x = monitor_geom.x + (monitor_geom.width as i16 / 2);
+                let center_y = monitor_geom.y + (monitor_geom.height as i16 / 2);
+                self.conn.warp_pointer(center_x, center_y)?;
+                self.last_warp = std::time::Instant::now();
+            }
 
             // Focus a window on that workspace
             if let Some(window) = self.workspaces[idx].focused
                 .or_else(|| self.workspaces[idx].floating.last().copied())
                 .or_else(|| self.workspaces[idx].tree.first_window())
             {
-                self.set_focus(window, true)?;
+                self.set_focus(window, warp_pointer)?;
             } else {
                 self.focused_window = None;
                 self.conn.set_active_window(None)?;
@@ -1367,16 +1397,18 @@ impl WindowManager {
                 .or_else(|| self.workspaces[idx].floating.last().copied())
                 .or_else(|| self.workspaces[idx].tree.first_window())
             {
-                self.set_focus(window, true)?;
+                self.set_focus(window, warp_pointer)?;
             } else {
-                // No windows - warp to center of monitor
+                // No windows - warp to center of monitor (only if requested)
                 self.focused_window = None;
                 self.conn.set_active_window(None)?;
-                let monitor_geom = self.monitors[current_monitor].geometry;
-                let center_x = monitor_geom.x + (monitor_geom.width as i16 / 2);
-                let center_y = monitor_geom.y + (monitor_geom.height as i16 / 2);
-                self.conn.warp_pointer(center_x, center_y)?;
-                self.last_warp = std::time::Instant::now();
+                if warp_pointer {
+                    let monitor_geom = self.monitors[current_monitor].geometry;
+                    let center_x = monitor_geom.x + (monitor_geom.width as i16 / 2);
+                    let center_y = monitor_geom.y + (monitor_geom.height as i16 / 2);
+                    self.conn.warp_pointer(center_x, center_y)?;
+                    self.last_warp = std::time::Instant::now();
+                }
             }
         }
 
@@ -1387,6 +1419,11 @@ impl WindowManager {
 
         self.conn.flush()?;
         Ok(())
+    }
+
+    /// Switch to workspace with pointer warping (default behavior for keybinds).
+    fn switch_workspace(&mut self, idx: usize) -> Result<()> {
+        self.switch_workspace_impl(idx, true)
     }
 
     fn move_to_workspace(&mut self, idx: usize) -> Result<()> {
@@ -1900,17 +1937,8 @@ impl WindowManager {
             .or_else(|| self.workspaces[workspace_idx].floating.last().copied())
             .or_else(|| self.workspaces[workspace_idx].tree.first_window())
         {
-            // Regrab on old window (unless floating)
-            if let Some(old) = self.focused_window {
-                if !self.is_floating(old) {
-                    self.conn.grab_button(old)?;
-                }
-            }
+            // set_focus handles grab/ungrab for old and new windows
             self.set_focus(window, true)?;
-            // Ungrab on new window (unless floating - keep for edge resize)
-            if !self.is_floating(window) {
-                self.conn.ungrab_button(window)?;
-            }
         } else {
             // No windows - warp to monitor center
             self.focused_window = None;
@@ -2021,15 +2049,8 @@ impl WindowManager {
 
         let next_window = floating[next_idx];
 
-        // Regrab button on old focused window (unless it's floating)
-        if let Some(old) = self.focused_window {
-            if !self.is_floating(old) {
-                self.conn.grab_button(old)?;
-            }
-        }
-
         // Focus and raise the next floating window (keyboard action, warp pointer)
-        // Keep button grabbed on floating windows for edge resize
+        // set_focus handles grab/ungrab for old and new windows
         self.set_focus(next_window, true)?;
         self.raise_window(next_window)?;
 
@@ -2171,6 +2192,8 @@ impl WindowManager {
             match MessageType::from_u32(msg_type) {
                 Some(MessageType::GetWorkspaces) => {
                     let workspaces = self.build_i3_workspaces();
+                    let focused_ws: Vec<_> = workspaces.iter().filter(|w| w.focused).map(|w| &w.name).collect();
+                    tracing::debug!("GET_WORKSPACES: returning {} workspaces, focused: {:?}", workspaces.len(), focused_ws);
                     let json = build_workspaces_json(&workspaces);
                     if let Some(ref mut i3_ipc) = self.i3_ipc_server {
                         i3_ipc.send_response(client_idx, msg_type, &json);
@@ -2204,8 +2227,14 @@ impl WindowManager {
                     }
                 }
                 Some(MessageType::RunCommand) => {
-                    // Return success for now - we could parse and execute i3 commands later
-                    let json = r#"[{"success":true}]"#;
+                    // Parse and execute i3-compatible commands
+                    let cmd_str = msg.payload_str().unwrap_or("");
+                    let success = self.execute_i3_command(cmd_str);
+                    let json = if success {
+                        r#"[{"success":true}]"#
+                    } else {
+                        r#"[{"success":false,"error":"command failed"}]"#
+                    };
                     if let Some(ref mut i3_ipc) = self.i3_ipc_server {
                         i3_ipc.send_response(client_idx, msg_type, json);
                     }
@@ -2218,6 +2247,12 @@ impl WindowManager {
                     }
                 }
             }
+        }
+
+        // Clean up disconnected/stale clients AFTER processing requests
+        // to avoid index invalidation during send_response
+        if let Some(ref mut i3_ipc) = self.i3_ipc_server {
+            i3_ipc.cleanup_clients();
         }
 
         Ok(())

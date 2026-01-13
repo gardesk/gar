@@ -179,21 +179,38 @@ impl I3IpcServer {
 
     /// Process incoming requests from all clients.
     /// Returns a list of (client_index, message) pairs.
-    /// Also cleans up stale/disconnected clients.
+    /// Note: Stale/disconnected clients are cleaned up AFTER requests are processed
+    /// to avoid index invalidation issues.
     pub fn poll_requests(&mut self) -> Vec<(usize, I3Message)> {
         let mut requests = Vec::new();
-        let mut to_remove = Vec::new();
 
         for (i, client) in self.clients.iter_mut().enumerate() {
             match client.read_message() {
                 ReadResult::Message(msg) => requests.push((i, msg)),
+                ReadResult::Disconnected | ReadResult::WouldBlock => {}
+            }
+        }
+
+        requests
+    }
+
+    /// Clean up disconnected and stale clients.
+    /// Call this AFTER processing requests to avoid index invalidation.
+    pub fn cleanup_clients(&mut self) {
+        let mut to_remove = Vec::new();
+
+        for (i, client) in self.clients.iter_mut().enumerate() {
+            // Try a non-destructive check - peek for disconnection
+            match client.read_message() {
                 ReadResult::Disconnected => to_remove.push(i),
                 ReadResult::WouldBlock => {
-                    // Check if this client is stale (never sent anything, no subscriptions)
                     if client.is_stale() {
                         tracing::debug!("Cleaning up stale i3 IPC client (no activity for {:?})", IDLE_CLIENT_TIMEOUT);
                         to_remove.push(i);
                     }
+                }
+                ReadResult::Message(_) => {
+                    // Message will be processed next poll cycle
                 }
             }
         }
@@ -202,8 +219,6 @@ impl I3IpcServer {
         for i in to_remove.into_iter().rev() {
             self.clients.remove(i);
         }
-
-        requests
     }
 
     /// Send a response to a specific client.
@@ -225,17 +240,24 @@ impl I3IpcServer {
     /// Broadcast a workspace event to all subscribed clients.
     pub fn broadcast_workspace_event(&mut self, json: &str) {
         let mut disconnected = Vec::new();
+        let subscribed_count = self.clients.iter().filter(|c| c.is_subscribed("workspace")).count();
+        tracing::debug!("Broadcasting workspace event to {} subscribed clients (of {} total)", subscribed_count, self.clients.len());
 
         for (i, client) in self.clients.iter_mut().enumerate() {
             if client.is_subscribed("workspace") {
-                if client.send_event(EventType::Workspace, json).is_err() {
-                    disconnected.push(i);
+                match client.send_event(EventType::Workspace, json) {
+                    Ok(_) => tracing::debug!("Sent workspace event to client {}", i),
+                    Err(e) => {
+                        tracing::warn!("Failed to send workspace event to client {}: {}", i, e);
+                        disconnected.push(i);
+                    }
                 }
             }
         }
 
         // Remove failed clients
         for i in disconnected.into_iter().rev() {
+            tracing::debug!("Removing disconnected client {}", i);
             self.clients.remove(i);
         }
     }
