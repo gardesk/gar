@@ -245,19 +245,6 @@ impl WindowManager {
     }
 
     pub fn handle_event(&mut self, event: Event) -> Result<()> {
-        // Log events to debug cursor flicker
-        match &event {
-            Event::MotionNotify(e) => {
-                tracing::info!("MOTION: window={} pos=({},{})", e.event, e.root_x, e.root_y);
-            }
-            Event::EnterNotify(e) => {
-                tracing::info!("ENTER: window={}", e.event);
-            }
-            Event::ButtonPress(e) => {
-                tracing::info!("BUTTON: window={} btn={}", e.event, e.detail);
-            }
-            _ => {}
-        }
         match event {
             Event::MapRequest(e) => self.handle_map_request(e)?,
             Event::ConfigureRequest(e) => self.handle_configure_request(e)?,
