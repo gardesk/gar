@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::io::{BufReader, BufWriter};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use super::i3_compat::{read_message, write_event, write_response, EventType, I3Message};
 
@@ -22,12 +23,19 @@ enum ReadResult {
     Disconnected,
 }
 
+/// Timeout for clients that have never sent a message and have no subscriptions.
+const IDLE_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// A connected i3 IPC client.
 struct I3Client {
     stream: UnixStream,
     reader: BufReader<UnixStream>,
     writer: BufWriter<UnixStream>,
     subscriptions: HashSet<String>,
+    /// When this client connected.
+    created_at: Instant,
+    /// When we last received a message from this client.
+    last_activity: Option<Instant>,
 }
 
 impl I3Client {
@@ -40,12 +48,33 @@ impl I3Client {
             reader,
             writer,
             subscriptions: HashSet::new(),
+            created_at: Instant::now(),
+            last_activity: None,
         })
+    }
+
+    /// Check if this client is stale and should be cleaned up.
+    /// A client is stale if it has never sent a message, has no subscriptions,
+    /// and has been connected for longer than IDLE_CLIENT_TIMEOUT.
+    fn is_stale(&self) -> bool {
+        // Clients with subscriptions are waiting for events - keep them
+        if !self.subscriptions.is_empty() {
+            return false;
+        }
+        // Clients that have sent messages are active - keep them
+        if self.last_activity.is_some() {
+            return false;
+        }
+        // New clients that haven't done anything yet - check timeout
+        self.created_at.elapsed() > IDLE_CLIENT_TIMEOUT
     }
 
     fn read_message(&mut self) -> ReadResult {
         match read_message(&mut self.reader) {
-            Ok(Some(msg)) => ReadResult::Message(msg),
+            Ok(Some(msg)) => {
+                self.last_activity = Some(Instant::now());
+                ReadResult::Message(msg)
+            }
             Ok(None) => ReadResult::WouldBlock,
             Err(e) => {
                 tracing::debug!("i3 IPC client read error: {}", e);
@@ -147,21 +176,27 @@ impl I3IpcServer {
 
     /// Process incoming requests from all clients.
     /// Returns a list of (client_index, message) pairs.
+    /// Also cleans up stale/disconnected clients.
     pub fn poll_requests(&mut self) -> Vec<(usize, I3Message)> {
         let mut requests = Vec::new();
-        let mut disconnected = Vec::new();
+        let mut to_remove = Vec::new();
 
         for (i, client) in self.clients.iter_mut().enumerate() {
             match client.read_message() {
                 ReadResult::Message(msg) => requests.push((i, msg)),
-                ReadResult::Disconnected => disconnected.push(i),
-                ReadResult::WouldBlock => {}
+                ReadResult::Disconnected => to_remove.push(i),
+                ReadResult::WouldBlock => {
+                    // Check if this client is stale (never sent anything, no subscriptions)
+                    if client.is_stale() {
+                        tracing::debug!("Cleaning up stale i3 IPC client (no activity for {:?})", IDLE_CLIENT_TIMEOUT);
+                        to_remove.push(i);
+                    }
+                }
             }
         }
 
-        // Remove disconnected clients (in reverse order to preserve indices)
-        for i in disconnected.into_iter().rev() {
-            tracing::debug!("i3 IPC client disconnected");
+        // Remove disconnected/stale clients (in reverse order to preserve indices)
+        for i in to_remove.into_iter().rev() {
             self.clients.remove(i);
         }
 
