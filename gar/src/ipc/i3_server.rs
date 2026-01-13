@@ -23,7 +23,9 @@ enum ReadResult {
     Disconnected,
 }
 
-/// Timeout for clients that have never sent a message and have no subscriptions.
+/// Timeout for one-shot clients (sent message but no subscription).
+const ONESHOT_CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for clients that connected but never sent anything.
 const IDLE_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A connected i3 IPC client.
@@ -54,18 +56,19 @@ impl I3Client {
     }
 
     /// Check if this client is stale and should be cleaned up.
-    /// A client is stale if it has never sent a message, has no subscriptions,
-    /// and has been connected for longer than IDLE_CLIENT_TIMEOUT.
     fn is_stale(&self) -> bool {
-        // Clients with subscriptions are waiting for events - keep them
+        // Clients with subscriptions are waiting for events - never stale
         if !self.subscriptions.is_empty() {
             return false;
         }
-        // Clients that have sent messages are active - keep them
-        if self.last_activity.is_some() {
-            return false;
+
+        // Clients that have sent messages but never subscribed (one-shot clients)
+        // Use shorter timeout since they've finished their request
+        if let Some(last) = self.last_activity {
+            return last.elapsed() > ONESHOT_CLIENT_TIMEOUT;
         }
-        // New clients that haven't done anything yet - check timeout
+
+        // New clients that haven't done anything yet - longer timeout
         self.created_at.elapsed() > IDLE_CLIENT_TIMEOUT
     }
 

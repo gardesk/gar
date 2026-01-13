@@ -644,16 +644,7 @@ impl WindowManager {
         // If not in a drag, check for edge cursor changes on floating windows
         if self.drag_state.is_none() {
             let window = event.event;
-            let is_managed = self.windows.contains_key(&window);
-            let is_float = is_managed && self.is_floating(window);
-
-            // Debug: log all motion events to track down cursor flicker
-            tracing::debug!(
-                "MotionNotify: window={} managed={} floating={} root_xy=({},{}) event_xy=({},{})",
-                window, is_managed, is_float, event.root_x, event.root_y, event.event_x, event.event_y
-            );
-
-            if is_float {
+            if self.windows.contains_key(&window) && self.is_floating(window) {
                 self.update_edge_cursor(window, event.root_x, event.root_y)?;
             }
             return Ok(());
