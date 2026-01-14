@@ -32,6 +32,8 @@ pub struct Config {
     pub mouse_follows_focus: bool,
     // Manual bar/panel reserved space (overrides struts)
     pub bar_height: u32,
+    // garbar integration: spawn garbar automatically if gar.bar is configured
+    pub bar_enabled: bool,
     // Compositor visual settings (picom)
     // These are stored for reference and potential dynamic picom config generation
     pub corner_radius: u32,
@@ -405,6 +407,8 @@ impl Default for Config {
             mouse_follows_focus: false,
             // Manual bar height (0 = use struts from dock windows)
             bar_height: 0,
+            // garbar not enabled by default (enabled when gar.bar table is set)
+            bar_enabled: false,
             // Compositor settings (picom) - matching picom.conf defaults
             corner_radius: 12,
             blur_enabled: true,

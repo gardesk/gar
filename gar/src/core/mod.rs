@@ -45,6 +45,8 @@ pub struct WindowManager {
     pub dock_struts: HashMap<XWindow, Strut>,
     /// Current edge being displayed (for cursor changes on floating window edges)
     pub current_edge_cursor: Option<(XWindow, crate::x11::events::ResizeEdge)>,
+    /// garbar child process (managed automatically when gar.bar is configured)
+    pub garbar_process: Option<std::process::Child>,
 }
 
 impl WindowManager {
@@ -140,6 +142,7 @@ impl WindowManager {
             focus_history: Vec::new(),
             dock_struts: HashMap::new(),
             current_edge_cursor: None,
+            garbar_process: None,
         })
     }
 

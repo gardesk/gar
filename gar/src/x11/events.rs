@@ -71,6 +71,109 @@ fn stop_graphical_session() {
         }
     }
 }
+
+/// Spawn garbar as a child process.
+/// Returns the child process handle if successful.
+fn spawn_garbar() -> Option<std::process::Child> {
+    tracing::info!("Spawning garbar...");
+
+    // Try to find garbar in PATH or common locations
+    let garbar_cmd = which_garbar().unwrap_or_else(|| "garbar".to_string());
+
+    // Determine i3 IPC socket path (same as gar's i3_server.rs)
+    let i3sock = std::env::var("XDG_RUNTIME_DIR")
+        .map(|dir| format!("{}/gar-i3.sock", dir))
+        .unwrap_or_else(|_| "/tmp/gar-i3.sock".to_string());
+
+    match Command::new(&garbar_cmd)
+        .arg("daemon")
+        .env("I3SOCK", &i3sock)
+        .spawn()
+    {
+        Ok(child) => {
+            tracing::info!("garbar started (PID {}), I3SOCK={}", child.id(), i3sock);
+            Some(child)
+        }
+        Err(e) => {
+            tracing::error!("Failed to spawn garbar: {}", e);
+            tracing::info!("Hint: Ensure garbar is installed and in PATH, or use 'cargo install --path garbar'");
+            None
+        }
+    }
+}
+
+/// Find garbar executable
+fn which_garbar() -> Option<String> {
+    // Check if garbar is in PATH
+    if Command::new("which")
+        .arg("garbar")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Some("garbar".to_string());
+    }
+
+    // Check common cargo install location
+    if let Ok(home) = std::env::var("HOME") {
+        let cargo_bin = format!("{}/.cargo/bin/garbar", home);
+        if std::path::Path::new(&cargo_bin).exists() {
+            return Some(cargo_bin);
+        }
+    }
+
+    // Check /usr/local/bin
+    if std::path::Path::new("/usr/local/bin/garbar").exists() {
+        return Some("/usr/local/bin/garbar".to_string());
+    }
+
+    None
+}
+
+/// Stop garbar gracefully by sending SIGTERM.
+fn stop_garbar(child: &mut std::process::Child) {
+    tracing::info!("Stopping garbar (PID {})...", child.id());
+
+    // Send SIGTERM for graceful shutdown
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+
+    // Wait briefly for it to exit
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            tracing::info!("garbar exited with status: {}", status);
+        }
+        Ok(None) => {
+            // Give it a moment to shut down
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    tracing::info!("garbar exited with status: {}", status);
+                }
+                Ok(None) => {
+                    // Force kill if still running
+                    tracing::warn!("garbar did not exit gracefully, sending SIGKILL");
+                    let _ = child.kill();
+                }
+                Err(e) => {
+                    tracing::warn!("Error waiting for garbar: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Error checking garbar status: {}", e);
+        }
+    }
+}
+
+/// Signal garbar to reload its configuration (SIGHUP).
+fn reload_garbar(child: &std::process::Child) {
+    tracing::info!("Signaling garbar to reload (PID {})...", child.id());
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGHUP);
+    }
+}
 use x11rb::protocol::xproto::{
     ButtonPressEvent, ButtonReleaseEvent, ClientMessageEvent, ConfigureRequestEvent,
     ConfigureWindowAux, ConnectionExt, DestroyNotifyEvent, EnterNotifyEvent, EventMask,
@@ -1562,6 +1665,40 @@ impl WindowManager {
         // Re-apply layout with new settings
         self.apply_layout()?;
 
+        // Handle garbar lifecycle based on new config
+        if self.config.bar_enabled {
+            // Check if garbar is still running
+            let garbar_alive = if let Some(ref mut child) = self.garbar_process {
+                match child.try_wait() {
+                    Ok(None) => true,  // Still running
+                    Ok(Some(status)) => {
+                        tracing::info!("garbar exited with status {}, will respawn", status);
+                        false
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to check garbar status: {}", e);
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+
+            if garbar_alive {
+                // garbar running, signal it to reload
+                if let Some(ref child) = self.garbar_process {
+                    reload_garbar(child);
+                }
+            } else {
+                // garbar not running, spawn it
+                self.garbar_process = spawn_garbar();
+            }
+        } else if let Some(ref mut child) = self.garbar_process {
+            // bar_enabled is now false, stop garbar
+            stop_garbar(child);
+            self.garbar_process = None;
+        }
+
         tracing::info!("Configuration reloaded");
         Ok(())
     }
@@ -1582,6 +1719,11 @@ impl WindowManager {
         // This allows user services (like garbg) bound to graphical-session.target to start
         start_graphical_session();
 
+        // Spawn garbar if gar.bar is configured
+        if self.config.bar_enabled {
+            self.garbar_process = spawn_garbar();
+        }
+
         while self.running {
             // Handle X11 events (non-blocking poll)
             while let Some(event) = self.conn.conn.poll_for_event()? {
@@ -1600,6 +1742,12 @@ impl WindowManager {
             // Small sleep to avoid busy-waiting when idle
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+
+        // Stop garbar if it was spawned
+        if let Some(ref mut child) = self.garbar_process {
+            stop_garbar(child);
+        }
+        self.garbar_process = None;
 
         // Signal systemd that graphical session has ended
         // This stops user services bound to graphical-session.target (like garbg)

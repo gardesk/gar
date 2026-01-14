@@ -114,11 +114,44 @@ impl LuaConfig {
 
         self.lua.load(&source).exec()?;
 
+        // Check if gar.bar table exists - enables garbar integration
+        self.check_bar_config()?;
+
         let state = self.state.lock().unwrap();
         tracing::info!(
-            "Config loaded: {} keybinds registered",
-            state.keybinds.len()
+            "Config loaded: {} keybinds registered, bar_enabled={}",
+            state.keybinds.len(),
+            state.config.bar_enabled
         );
+
+        Ok(())
+    }
+
+    /// Check if gar.bar table is configured, enabling garbar integration
+    fn check_bar_config(&self) -> LuaResult<()> {
+        let globals = self.lua.globals();
+        let gar: Table = globals.get("gar")?;
+
+        // Check if gar.bar exists and is a table
+        match gar.get::<Table>("bar") {
+            Ok(bar_table) => {
+                // gar.bar exists! Enable garbar integration
+                let mut state = self.state.lock().unwrap();
+                state.config.bar_enabled = true;
+
+                // Optionally read bar height from config for reserved space
+                if let Ok(height) = bar_table.get::<u32>("height") {
+                    state.config.bar_height = height;
+                    tracing::info!("garbar integration enabled (height={})", height);
+                } else {
+                    tracing::info!("garbar integration enabled (default height)");
+                }
+            }
+            Err(_) => {
+                // gar.bar not set, garbar won't be spawned
+                tracing::debug!("gar.bar not configured, garbar integration disabled");
+            }
+        }
 
         Ok(())
     }

@@ -47,8 +47,8 @@ fi
 # Set log level
 export GAR_LOG=info
 
-# Launch polybar after gar starts (needs i3 IPC socket)
-(sleep 0.5 && ~/.config/polybar/launch.sh) &
+# garbar is now launched natively by gar when gar.bar is configured in init.lua
+# (Legacy polybar launch removed - use gar.bar config instead)
 
 # Start gar
 exec /home/mfwolffe/GithubOrgs/tenseleyFlow/gar/target/release/gar
