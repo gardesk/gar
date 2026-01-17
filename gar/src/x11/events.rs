@@ -1148,8 +1148,10 @@ impl WindowManager {
                 self.reload_config()?;
             }
             Action::Exit => {
-                tracing::info!("Exit requested");
+                tracing::info!("Exit requested, will exit event loop");
                 self.running = false;
+                // Force an immediate return from event handling
+                return Ok(());
             }
             Action::ToggleFloating => {
                 if let Some(window) = self.focused_window {
@@ -1743,11 +1745,29 @@ impl WindowManager {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
+        // Unmap all managed windows so they don't persist on the X server
+        // This ensures windows aren't visible when returning to the greeter
+        tracing::info!("Unmapping {} managed windows", self.windows.len());
+        for &window in self.windows.keys() {
+            tracing::debug!("Unmapping window {}", window);
+            let _ = self.conn.conn.unmap_window(window);
+        }
+        // Sync to ensure X server processes all unmap requests before we exit
+        let _ = self.conn.sync();
+        tracing::info!("Windows unmapped and synced");
+
         // Stop garbar if it was spawned
         if let Some(ref mut child) = self.garbar_process {
             stop_garbar(child);
         }
         self.garbar_process = None;
+
+        // Kill picom to prevent compositor effects from bleeding into the greeter
+        tracing::info!("Killing picom...");
+        let _ = std::process::Command::new("pkill")
+            .arg("-x")
+            .arg("picom")
+            .status();
 
         // Signal systemd that graphical session has ended
         // This stops user services bound to graphical-session.target (like garbg)

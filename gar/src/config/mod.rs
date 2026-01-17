@@ -251,7 +251,6 @@ backend = "glx";
 vsync = true;
 use-ewmh-active-win = true;
 glx-no-stencil = true;
-glx-no-rebind-pixmap = true;
 
 # Rounded Corners
 corner-radius = {};
