@@ -1,6 +1,7 @@
 [Desktop Entry]
 Name=gar
-Comment=Tiling window manager with smart splits
-Exec=/home/mfwolffe/GithubOrgs/tenseleyFlow/gar/gar-session.sh
+Comment=gar tiling window manager - modular X11 desktop
+Exec=/usr/local/share/gar/gar-session.sh
 Type=XSession
 DesktopNames=gar
+Keywords=tiling;window;manager;wm;x11;

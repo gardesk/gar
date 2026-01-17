@@ -1,7 +1,27 @@
 #!/bin/bash
 # gar session wrapper - sets up environment before starting gar
+# This script is typically installed to /usr/local/share/gar/gar-session.sh
 
-GAR_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Find gar binary - check common locations
+GAR_BIN="${GAR_BIN:-}"
+if [ -z "$GAR_BIN" ]; then
+    for path in /usr/local/bin/gar /usr/bin/gar "$HOME/.local/bin/gar"; do
+        if [ -x "$path" ]; then
+            GAR_BIN="$path"
+            break
+        fi
+    done
+fi
+
+# Fallback to PATH lookup
+if [ -z "$GAR_BIN" ] || [ ! -x "$GAR_BIN" ]; then
+    GAR_BIN="$(command -v gar 2>/dev/null || true)"
+fi
+
+if [ -z "$GAR_BIN" ] || [ ! -x "$GAR_BIN" ]; then
+    echo "ERROR: gar binary not found. Please ensure gar is installed." >&2
+    exit 1
+fi
 
 # Optional: configure monitor layout
 # Uncomment and customize for your setup:
@@ -51,4 +71,4 @@ export GAR_LOG=info
 # (Legacy polybar launch removed - use gar.bar config instead)
 
 # Start gar
-exec /home/mfwolffe/GithubOrgs/tenseleyFlow/gar/target/release/gar
+exec "$GAR_BIN"
