@@ -6,7 +6,7 @@ pub enum SplitDirection {
     Vertical,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
     Left,
     Right,
@@ -286,10 +286,13 @@ impl Node {
     }
 
     /// Find adjacent window in a direction, given geometries.
+    /// If `preferred` is Some and is a valid candidate, it will be returned.
+    /// This enables "window memory" - remembering which window was last focused in a direction.
     pub fn find_adjacent(
         geometries: &[(XWindow, Rect)],
         from: XWindow,
         direction: Direction,
+        preferred: Option<XWindow>,
     ) -> Option<XWindow> {
         let from_rect = geometries.iter().find(|(w, _)| *w == from)?.1;
 
@@ -315,6 +318,13 @@ impl Node {
                 }
             })
             .collect();
+
+        // If preferred window is a valid candidate, use it (window memory)
+        if let Some(pref) = preferred {
+            if candidates.iter().any(|(w, _)| *w == pref) {
+                return Some(pref);
+            }
+        }
 
         // Find the closest window in the direction
         // Prioritize alignment perpendicular to movement, then distance in movement direction

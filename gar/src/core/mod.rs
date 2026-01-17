@@ -47,6 +47,9 @@ pub struct WindowManager {
     pub current_edge_cursor: Option<(XWindow, crate::x11::events::ResizeEdge)>,
     /// garbar child process (managed automatically when gar.bar is configured)
     pub garbar_process: Option<std::process::Child>,
+    /// Directional focus memory: (source_window, direction) -> last_target_window
+    /// Used to remember which window was focused when navigating in a direction
+    pub directional_focus_memory: HashMap<(XWindow, Direction), XWindow>,
 }
 
 impl WindowManager {
@@ -143,6 +146,7 @@ impl WindowManager {
             dock_struts: HashMap::new(),
             current_edge_cursor: None,
             garbar_process: None,
+            directional_focus_memory: HashMap::new(),
         })
     }
 
@@ -433,6 +437,11 @@ impl WindowManager {
 
             // Remove from focus history
             self.focus_history.retain(|&w| w != window);
+
+            // Remove directional focus memory entries involving this window
+            self.directional_focus_memory.retain(|(src, _), tgt| {
+                *src != window && *tgt != window
+            });
 
             // Update focus if this was the focused window
             if self.focused_window == Some(window) {
