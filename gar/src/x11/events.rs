@@ -620,9 +620,11 @@ impl WindowManager {
     }
 
     fn handle_button_press(&mut self, event: ButtonPressEvent) -> Result<()> {
-        let window = event.event;
+        let event_window = event.event;
         let child = event.child;
-        tracing::debug!("ButtonPress on window {}, child {}, button {}", window, child, event.detail);
+        // Translate frame window to client window if needed
+        let window = self.frames.client_for_frame(event_window).unwrap_or(event_window);
+        tracing::debug!("ButtonPress on window {} (event_window={}), child {}, button {}", window, event_window, child, event.detail);
 
         // If we're already in a drag, ignore additional button presses
         if self.drag_state.is_some() {
@@ -898,7 +900,10 @@ impl WindowManager {
     fn handle_motion_notify(&mut self, event: MotionNotifyEvent) -> Result<()> {
         // If not in a drag, check for edge cursor changes
         if self.drag_state.is_none() {
-            let window = event.event;
+            let event_window = event.event;
+            // Translate frame window to client window if needed
+            let window = self.frames.client_for_frame(event_window).unwrap_or(event_window);
+
             if self.windows.contains_key(&window) {
                 if self.is_floating(window) {
                     self.update_edge_cursor(window, event.root_x, event.root_y)?;
@@ -1141,18 +1146,32 @@ impl WindowManager {
             return Ok(()); // No change
         }
 
-        // Clear old cursor state
+        // Clear old cursor state (use frame windows if they exist)
         if let Some((old_w1, old_w2, _)) = self.tiled_edge_cursor {
-            self.conn.clear_window_cursor(old_w1)?;
-            self.conn.clear_window_cursor(old_w2)?;
+            let frame1 = self.frames.frame_for_client(old_w1).unwrap_or(old_w1);
+            let frame2 = self.frames.frame_for_client(old_w2).unwrap_or(old_w2);
+            self.conn.clear_window_cursor(frame1)?;
+            self.conn.clear_window_cursor(frame2)?;
+            // Also clear on client windows in case they don't have frames
+            if frame1 != old_w1 {
+                self.conn.clear_window_cursor(old_w1)?;
+            }
+            if frame2 != old_w2 {
+                self.conn.clear_window_cursor(old_w2)?;
+            }
         }
 
         if let Some((w1, w2, dir)) = new_state {
-            // Set resize cursor on both windows sharing the edge
+            // Set resize cursor on both windows sharing the edge (and their frames)
             let cursor = match dir {
                 Direction::Left | Direction::Right => self.conn.cursor_h_double,
                 Direction::Up | Direction::Down => self.conn.cursor_v_double,
             };
+            let frame1 = self.frames.frame_for_client(w1).unwrap_or(w1);
+            let frame2 = self.frames.frame_for_client(w2).unwrap_or(w2);
+            self.conn.set_window_cursor(frame1, cursor)?;
+            self.conn.set_window_cursor(frame2, cursor)?;
+            // Also set on client windows
             self.conn.set_window_cursor(w1, cursor)?;
             self.conn.set_window_cursor(w2, cursor)?;
         }
