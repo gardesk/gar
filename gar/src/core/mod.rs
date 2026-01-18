@@ -313,12 +313,33 @@ impl WindowManager {
 
         tracing::info!("Managing window {} on workspace {} (floating)", window, workspace_idx + 1);
 
-        // Calculate floating geometry
+        // Get window's requested geometry - respect the window's size/position
         let screen = self.screen_rect();
-        let float_width = (screen.width * 4 / 5).max(400);
-        let float_height = (screen.height * 4 / 5).max(300);
-        let float_x = screen.x + (screen.width as i16 - float_width as i16) / 2;
-        let float_y = screen.y + (screen.height as i16 - float_height as i16) / 2;
+        let (float_x, float_y, float_width, float_height) =
+            if let Ok(Ok(geom)) = self.conn.conn.get_geometry(window).map(|c| c.reply()) {
+                // Use window's actual geometry, but ensure it fits on screen
+                let w = geom.width.min(screen.width).max(100);
+                let h = geom.height.min(screen.height).max(100);
+                // Use window's position if valid, otherwise center
+                let x = if geom.x >= 0 && (geom.x as u16) < screen.width {
+                    geom.x
+                } else {
+                    screen.x + (screen.width as i16 - w as i16) / 2
+                };
+                let y = if geom.y >= 0 && (geom.y as u16) < screen.height {
+                    geom.y
+                } else {
+                    screen.y + (screen.height as i16 - h as i16) / 2
+                };
+                (x, y, w, h)
+            } else {
+                // Fallback to default centered geometry (80% of screen)
+                let w = (screen.width * 4 / 5).max(400);
+                let h = (screen.height * 4 / 5).max(300);
+                let x = screen.x + (screen.width as i16 - w as i16) / 2;
+                let y = screen.y + (screen.height as i16 - h as i16) / 2;
+                (x, y, w, h)
+            };
 
         // Track the window with floating state
         let mut win = Window::new(window, workspace_idx);
@@ -344,12 +365,33 @@ impl WindowManager {
 
         tracing::info!("Managing window {} (floating)", window);
 
-        // Calculate centered floating geometry
+        // Get window's requested geometry - respect the window's size/position
         let screen = self.screen_rect();
-        let float_width = 640.min(screen.width.saturating_sub(40));
-        let float_height = 480.min(screen.height.saturating_sub(40));
-        let float_x = screen.x + (screen.width as i16 - float_width as i16) / 2;
-        let float_y = screen.y + (screen.height as i16 - float_height as i16) / 2;
+        let (float_x, float_y, float_width, float_height) =
+            if let Ok(Ok(geom)) = self.conn.conn.get_geometry(window).map(|c| c.reply()) {
+                // Use window's actual geometry, but ensure it fits on screen
+                let w = geom.width.min(screen.width).max(100);
+                let h = geom.height.min(screen.height).max(100);
+                // Use window's position if valid, otherwise center
+                let x = if geom.x >= 0 && (geom.x as u16) < screen.width {
+                    geom.x
+                } else {
+                    screen.x + (screen.width as i16 - w as i16) / 2
+                };
+                let y = if geom.y >= 0 && (geom.y as u16) < screen.height {
+                    geom.y
+                } else {
+                    screen.y + (screen.height as i16 - h as i16) / 2
+                };
+                (x, y, w, h)
+            } else {
+                // Fallback to default centered geometry
+                let w = 640u16.min(screen.width.saturating_sub(40));
+                let h = 480u16.min(screen.height.saturating_sub(40));
+                let x = screen.x + (screen.width as i16 - w as i16) / 2;
+                let y = screen.y + (screen.height as i16 - h as i16) / 2;
+                (x, y, w, h)
+            };
 
         // Track the window with floating state
         let mut win = Window::new(window, self.focused_workspace);
