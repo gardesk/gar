@@ -896,6 +896,9 @@ impl WindowManager {
             let window = event.event;
             if self.windows.contains_key(&window) && self.is_floating(window) {
                 self.update_edge_cursor(window, event.root_x, event.root_y)?;
+            } else {
+                // Check for tiled edge hover (for cursor feedback)
+                self.update_tiled_edge_cursor(event.root_x, event.root_y)?;
             }
             return Ok(());
         }
@@ -1100,6 +1103,38 @@ impl WindowManager {
             self.current_edge_cursor = Some((window, ResizeEdge::None));
         }
 
+        Ok(())
+    }
+
+    /// Update cursor when hovering over tiled window edges/gaps.
+    fn update_tiled_edge_cursor(&mut self, root_x: i16, root_y: i16) -> Result<()> {
+        let work_area = self.work_area();
+        let geometries = self.current_workspace().tree.calculate_geometries(work_area);
+
+        let edge = self.find_tiled_edge(root_x, root_y, &geometries);
+
+        let new_direction = edge.map(|(_, dir, _)| dir);
+
+        // Check if cursor state changed
+        if new_direction == self.tiled_edge_cursor {
+            return Ok(()); // No change
+        }
+
+        if let Some(dir) = new_direction {
+            // Set resize cursor on root
+            let cursor = match dir {
+                Direction::Left | Direction::Right => self.conn.cursor_left,
+                Direction::Up | Direction::Down => self.conn.cursor_top,
+            };
+            self.conn.set_window_cursor(self.conn.root, cursor)?;
+            self.conn.flush()?;
+        } else if self.tiled_edge_cursor.is_some() {
+            // Clear resize cursor from root
+            self.conn.clear_window_cursor(self.conn.root)?;
+            self.conn.flush()?;
+        }
+
+        self.tiled_edge_cursor = new_direction;
         Ok(())
     }
 
@@ -2327,7 +2362,7 @@ impl WindowManager {
         y: i16,
         geometries: &[(u32, Rect)],
     ) -> Option<(u32, Direction, u16)> {
-        const TILED_EDGE_THRESHOLD: i16 = 8;
+        const TILED_EDGE_THRESHOLD: i16 = 16;
         let gap_tolerance = self.config.gap_inner as i16 + 4;
 
         for (w1, r1) in geometries {
