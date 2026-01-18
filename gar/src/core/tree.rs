@@ -256,6 +256,75 @@ impl Node {
         }
     }
 
+    /// Get the split ratio affecting a window in the given direction.
+    /// Returns None if no such split exists.
+    pub fn get_split_ratio(&self, window: XWindow, direction: Direction) -> Option<f32> {
+        match self {
+            Node::Leaf { .. } => None,
+            Node::Internal {
+                split,
+                ratio,
+                left,
+                right,
+            } => {
+                // Check if this split is in the right orientation for the direction
+                let dominated = match (split, direction) {
+                    (SplitDirection::Vertical, Direction::Left | Direction::Right) => true,
+                    (SplitDirection::Horizontal, Direction::Up | Direction::Down) => true,
+                    _ => false,
+                };
+
+                if dominated && (left.contains(window) || right.contains(window)) {
+                    return Some(*ratio);
+                }
+
+                // Recurse into children
+                if left.contains(window) {
+                    left.get_split_ratio(window, direction)
+                } else if right.contains(window) {
+                    right.get_split_ratio(window, direction)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Set the split ratio affecting a window in the given direction.
+    /// Returns true if the ratio was set.
+    pub fn set_split_ratio(&mut self, window: XWindow, direction: Direction, new_ratio: f32) -> bool {
+        match self {
+            Node::Leaf { .. } => false,
+            Node::Internal {
+                split,
+                ratio,
+                left,
+                right,
+            } => {
+                // Check if this split is in the right orientation for the direction
+                let dominated = match (split, direction) {
+                    (SplitDirection::Vertical, Direction::Left | Direction::Right) => true,
+                    (SplitDirection::Horizontal, Direction::Up | Direction::Down) => true,
+                    _ => false,
+                };
+
+                if dominated && (left.contains(window) || right.contains(window)) {
+                    *ratio = new_ratio.clamp(0.1, 0.9);
+                    return true;
+                }
+
+                // Recurse into children
+                if left.contains(window) {
+                    left.set_split_ratio(window, direction, new_ratio)
+                } else if right.contains(window) {
+                    right.set_split_ratio(window, direction, new_ratio)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// Swap two windows in the tree.
     pub fn swap(&mut self, a: XWindow, b: XWindow) -> bool {
         // Find and swap the windows
