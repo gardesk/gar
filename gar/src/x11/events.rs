@@ -72,10 +72,44 @@ fn stop_graphical_session() {
     }
 }
 
-/// Spawn garbar as a child process.
-/// Returns the child process handle if successful.
+/// Get garbar socket path
+fn garbar_socket_path() -> String {
+    std::env::var("XDG_RUNTIME_DIR")
+        .map(|dir| format!("{}/garbar.sock", dir))
+        .unwrap_or_else(|_| "/tmp/garbar.sock".to_string())
+}
+
+/// Check if garbar is healthy (socket exists)
+fn is_garbar_healthy() -> bool {
+    std::path::Path::new(&garbar_socket_path()).exists()
+}
+
+/// Kill any stale garbar process that isn't responding
+fn cleanup_stale_garbar() {
+    let pid_path = std::env::var("XDG_RUNTIME_DIR")
+        .map(|dir| format!("{}/garbar.pid", dir))
+        .unwrap_or_else(|_| "/tmp/garbar.pid".to_string());
+
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            // Check if process exists but socket doesn't (stale process)
+            let proc_path = format!("/proc/{}", pid);
+            if std::path::Path::new(&proc_path).exists() && !is_garbar_healthy() {
+                tracing::warn!("Killing stale garbar process (PID {})", pid);
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+}
+
 fn spawn_garbar() -> Option<std::process::Child> {
     tracing::info!("Spawning garbar...");
+
+    // Clean up any stale garbar process first
+    cleanup_stale_garbar();
 
     // Try to find garbar in PATH or common locations
     let garbar_cmd = which_garbar().unwrap_or_else(|| "garbar".to_string());
@@ -85,13 +119,29 @@ fn spawn_garbar() -> Option<std::process::Child> {
         .map(|dir| format!("{}/gar-i3.sock", dir))
         .unwrap_or_else(|_| "/tmp/gar-i3.sock".to_string());
 
+    // Inherit DISPLAY from current environment, fallback to :0
+    let x_display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string());
+
     match Command::new(&garbar_cmd)
         .arg("daemon")
         .env("I3SOCK", &i3sock)
+        .env("DISPLAY", &x_display)
         .spawn()
     {
         Ok(child) => {
-            tracing::info!("garbar started (PID {}), I3SOCK={}", child.id(), i3sock);
+            tracing::info!("garbar started (PID {}), DISPLAY={}, I3SOCK={}", child.id(), x_display, i3sock);
+
+            // Wait briefly and verify garbar becomes healthy
+            for attempt in 1..=10 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if is_garbar_healthy() {
+                    tracing::info!("garbar socket ready after {}ms", attempt * 200);
+                    return Some(child);
+                }
+            }
+
+            // Socket never appeared - garbar might be stuck
+            tracing::warn!("garbar socket not ready after 2s, process may be stuck");
             Some(child)
         }
         Err(e) => {
@@ -2148,28 +2198,36 @@ impl WindowManager {
 
         // Handle garbar lifecycle based on new config
         if self.config.bar_enabled {
-            // Check if garbar is still running
-            let garbar_alive = if let Some(ref mut child) = self.garbar_process {
+            // Check if garbar is still running AND healthy (socket exists)
+            let (garbar_alive, garbar_healthy) = if let Some(ref mut child) = self.garbar_process {
                 match child.try_wait() {
-                    Ok(None) => true,  // Still running
+                    Ok(None) => (true, is_garbar_healthy()),  // Process running, check socket
                     Ok(Some(status)) => {
                         tracing::info!("garbar exited with status {}, will respawn", status);
-                        false
+                        (false, false)
                     }
                     Err(e) => {
                         tracing::warn!("Failed to check garbar status: {}", e);
-                        false
+                        (false, false)
                     }
                 }
             } else {
-                false
+                (false, false)
             };
 
-            if garbar_alive {
-                // garbar running, signal it to reload
+            if garbar_alive && garbar_healthy {
+                // garbar running and healthy, signal it to reload
                 if let Some(ref child) = self.garbar_process {
                     reload_garbar(child);
                 }
+            } else if garbar_alive && !garbar_healthy {
+                // garbar process exists but socket doesn't - it's stuck
+                tracing::warn!("garbar process alive but socket missing, restarting...");
+                if let Some(ref mut child) = self.garbar_process {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                self.garbar_process = spawn_garbar();
             } else {
                 // garbar not running, spawn it
                 self.garbar_process = spawn_garbar();
