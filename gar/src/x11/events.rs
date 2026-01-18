@@ -715,59 +715,54 @@ impl WindowManager {
             }
         }
 
-        // Check for edge resize on TILED windows (click near edge with adjacent window)
-        if !has_mod && event.detail == 1 && self.windows.contains_key(&window) && !self.is_floating(window) {
-            let work_area = self.work_area();
-            let geometries = self.current_workspace().tree.calculate_geometries(work_area);
+        // Check for edge resize on TILED windows - use cursor state from motion detection
+        // If the cursor was changed to resize cursor, we know we're on a valid edge
+        if !has_mod && event.detail == 1 {
+            if let Some((w1, w2, direction)) = self.tiled_edge_cursor {
+                let work_area = self.work_area();
+                let geometries = self.current_workspace().tree.calculate_geometries(work_area);
 
-            // Find the geometry of the clicked window
-            if let Some((_, my_rect)) = geometries.iter().find(|(w, _)| *w == window) {
-                let my_rect = *my_rect;
-                if let Some((w1, w2, direction)) =
-                    self.find_tiled_resize_edge(window, &my_rect, event.root_x, event.root_y, &geometries)
-                {
-                    // Calculate container size from both windows
-                    let other_rect = geometries.iter().find(|(w, _)| *w == if w1 == window { w2 } else { w1 }).map(|(_, r)| r);
-                    let container_size = if let Some(other) = other_rect {
-                        match direction {
-                            Direction::Left | Direction::Right => my_rect.width + other.width,
-                            Direction::Up | Direction::Down => my_rect.height + other.height,
-                        }
-                    } else {
-                        match direction {
-                            Direction::Left | Direction::Right => my_rect.width * 2,
-                            Direction::Up | Direction::Down => my_rect.height * 2,
-                        }
-                    };
+                // Calculate container size from both windows
+                let rect1 = geometries.iter().find(|(w, _)| *w == w1).map(|(_, r)| r);
+                let rect2 = geometries.iter().find(|(w, _)| *w == w2).map(|(_, r)| r);
+                let container_size = match (rect1, rect2) {
+                    (Some(r1), Some(r2)) => match direction {
+                        Direction::Left | Direction::Right => r1.width + r2.width,
+                        Direction::Up | Direction::Down => r1.height + r2.height,
+                    },
+                    _ => match direction {
+                        Direction::Left | Direction::Right => work_area.width,
+                        Direction::Up | Direction::Down => work_area.height,
+                    },
+                };
 
-                    // Get current ratio from tree (use w1 which is the "left/top" window)
-                    let start_ratio = self
-                        .current_workspace()
-                        .tree
-                        .get_split_ratio(w1, direction)
-                        .unwrap_or(0.5);
+                // Get current ratio from tree (use w1 which is the "left/top" window)
+                let start_ratio = self
+                    .current_workspace()
+                    .tree
+                    .get_split_ratio(w1, direction)
+                    .unwrap_or(0.5);
 
-                    let start_pos = match direction {
-                        Direction::Left | Direction::Right => event.root_x,
-                        Direction::Up | Direction::Down => event.root_y,
-                    };
+                let start_pos = match direction {
+                    Direction::Left | Direction::Right => event.root_x,
+                    Direction::Up | Direction::Down => event.root_y,
+                };
 
-                    self.drag_state = Some(DragState::TiledResize {
-                        direction,
-                        start_pos,
-                        start_ratio,
-                        window: w1,
-                        container_size,
-                        workspace: self.focused_workspace,
-                    });
+                self.drag_state = Some(DragState::TiledResize {
+                    direction,
+                    start_pos,
+                    start_ratio,
+                    window: w1,
+                    container_size,
+                    workspace: self.focused_workspace,
+                });
 
-                    let cursor = match direction {
-                        Direction::Left | Direction::Right => self.conn.cursor_h_double,
-                        Direction::Up | Direction::Down => self.conn.cursor_v_double,
-                    };
-                    self.conn.grab_pointer(Some(cursor))?;
-                    return Ok(());
-                }
+                let cursor = match direction {
+                    Direction::Left | Direction::Right => self.conn.cursor_h_double,
+                    Direction::Up | Direction::Down => self.conn.cursor_v_double,
+                };
+                self.conn.grab_pointer(Some(cursor))?;
+                return Ok(());
             }
         }
 
