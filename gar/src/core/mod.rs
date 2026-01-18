@@ -45,8 +45,9 @@ pub struct WindowManager {
     pub dock_struts: HashMap<XWindow, Strut>,
     /// Current edge being displayed (for cursor changes on floating window edges)
     pub current_edge_cursor: Option<(XWindow, crate::x11::events::ResizeEdge)>,
-    /// Current tiled edge cursor direction (for cursor changes on tiled window gaps)
-    pub tiled_edge_cursor: Option<Direction>,
+    /// Current tiled edge cursor state: (window1, window2, direction)
+    /// Tracks which windows have cursor overrides so we can clear them
+    pub tiled_edge_cursor: Option<(XWindow, XWindow, Direction)>,
     /// garbar child process (managed automatically when gar.bar is configured)
     pub garbar_process: Option<std::process::Child>,
     /// Directional focus memory: (source_window, direction) -> last_target_window

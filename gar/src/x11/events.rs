@@ -726,7 +726,7 @@ impl WindowManager {
             let edge_result = self.find_tiled_edge(event.root_x, event.root_y, &geometries);
             tracing::debug!("find_tiled_edge result: {:?}", edge_result);
 
-            if let Some((window, direction, container_size)) = edge_result {
+            if let Some((window, _window2, direction, container_size)) = edge_result {
                 // Get current ratio from tree
                 let start_ratio = self
                     .current_workspace()
@@ -1111,37 +1111,33 @@ impl WindowManager {
 
         let edge = self.find_tiled_edge(root_x, root_y, &geometries);
 
-        let new_state = edge.map(|(w, dir, _)| (w, dir));
+        let new_state = edge.map(|(w1, w2, dir, _)| (w1, w2, dir));
 
         // Check if cursor state changed
-        if new_state.map(|(_, d)| d) == self.tiled_edge_cursor {
+        if new_state == self.tiled_edge_cursor {
             return Ok(()); // No change
         }
 
-        // Clear old cursor state
-        if self.tiled_edge_cursor.is_some() {
-            // Clear cursor on all tiled windows and root
-            for (win, _) in &geometries {
-                self.conn.clear_window_cursor(*win)?;
-            }
+        // Clear old cursor state on the specific windows that had it
+        if let Some((old_w1, old_w2, _)) = self.tiled_edge_cursor {
+            self.conn.clear_window_cursor(old_w1)?;
+            self.conn.clear_window_cursor(old_w2)?;
             self.conn.clear_window_cursor(self.conn.root)?;
         }
 
-        if let Some((_, dir)) = new_state {
-            // Set resize cursor on all tiled windows AND root
-            // This ensures cursor shows even when mouse is over a window
+        if let Some((w1, w2, dir)) = new_state {
+            // Set resize cursor on the two windows sharing the edge AND root
             let cursor = match dir {
                 Direction::Left | Direction::Right => self.conn.cursor_h_double,
                 Direction::Up | Direction::Down => self.conn.cursor_v_double,
             };
-            for (win, _) in &geometries {
-                self.conn.set_window_cursor(*win, cursor)?;
-            }
+            self.conn.set_window_cursor(w1, cursor)?;
+            self.conn.set_window_cursor(w2, cursor)?;
             self.conn.set_window_cursor(self.conn.root, cursor)?;
-            self.conn.flush()?;
         }
+        self.conn.flush()?;
 
-        self.tiled_edge_cursor = new_state.map(|(_, d)| d);
+        self.tiled_edge_cursor = new_state;
         Ok(())
     }
 
@@ -2361,14 +2357,14 @@ impl WindowManager {
     }
 
     /// Find if cursor is in the gap between two adjacent tiled windows.
-    /// Returns (window, direction, container_size) if on a valid shared edge.
+    /// Returns (window1, window2, direction, container_size) if on a valid shared edge.
     /// Only matches gaps between windows, NOT outer edges.
     fn find_tiled_edge(
         &self,
         x: i16,
         y: i16,
         geometries: &[(u32, Rect)],
-    ) -> Option<(u32, Direction, u16)> {
+    ) -> Option<(u32, u32, Direction, u16)> {
         const TILED_EDGE_THRESHOLD: i16 = 16;
         let gap_tolerance = self.config.gap_inner as i16 + 4;
 
@@ -2391,7 +2387,7 @@ impl WindowManager {
                         let gap_center = (r1_right + r2.x) / 2;
                         if (x - gap_center).abs() <= TILED_EDGE_THRESHOLD {
                             let container_width = (r1.width + r2.width) as u16;
-                            return Some((*w1, Direction::Right, container_width));
+                            return Some((*w1, *w2, Direction::Right, container_width));
                         }
                     }
                 }
@@ -2409,7 +2405,7 @@ impl WindowManager {
                         let gap_center = (r1_bottom + r2.y) / 2;
                         if (y - gap_center).abs() <= TILED_EDGE_THRESHOLD {
                             let container_height = (r1.height + r2.height) as u16;
-                            return Some((*w1, Direction::Down, container_height));
+                            return Some((*w1, *w2, Direction::Down, container_height));
                         }
                     }
                 }
