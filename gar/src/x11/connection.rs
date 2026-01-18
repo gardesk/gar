@@ -94,6 +94,8 @@ pub struct Connection {
     pub cursor_right: u32,
     pub cursor_top: u32,
     pub cursor_bottom: u32,
+    pub cursor_h_double: u32,  // sb_h_double_arrow - horizontal resize
+    pub cursor_v_double: u32,  // sb_v_double_arrow - vertical resize
 }
 
 impl Connection {
@@ -165,6 +167,8 @@ impl Connection {
             cursor_right,
             cursor_top,
             cursor_bottom,
+            cursor_h_double,
+            cursor_v_double,
         ) = Self::create_cursors(&conn)?;
 
         tracing::info!(
@@ -220,6 +224,8 @@ impl Connection {
             cursor_right,
             cursor_top,
             cursor_bottom,
+            cursor_h_double,
+            cursor_v_double,
         })
     }
 
@@ -286,7 +292,7 @@ impl Connection {
     }
 
     /// Create all cursors used by the window manager.
-    fn create_cursors(conn: &RustConnection) -> Result<(u32, u32, u32, u32, u32, u32, u32, u32, u32, u32), Error> {
+    fn create_cursors(conn: &RustConnection) -> Result<(u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32), Error> {
         // Open the cursor font
         let font: Font = conn.generate_id()?;
         conn.open_font(font, b"cursor")?;
@@ -320,6 +326,8 @@ impl Connection {
         let cursor_right = create(96)?;        // right_side
         let cursor_top = create(138)?;         // top_side
         let cursor_bottom = create(16)?;       // bottom_side
+        let cursor_h_double = create(108)?;    // sb_h_double_arrow
+        let cursor_v_double = create(116)?;    // sb_v_double_arrow
 
         // Close font (cursors keep their own references)
         conn.close_font(font)?;
@@ -335,6 +343,8 @@ impl Connection {
             cursor_right,
             cursor_top,
             cursor_bottom,
+            cursor_h_double,
+            cursor_v_double,
         ))
     }
 

@@ -756,8 +756,8 @@ impl WindowManager {
                 });
 
                 let cursor = match direction {
-                    Direction::Left | Direction::Right => self.conn.cursor_left,
-                    Direction::Up | Direction::Down => self.conn.cursor_top,
+                    Direction::Left | Direction::Right => self.conn.cursor_h_double,
+                    Direction::Up | Direction::Down => self.conn.cursor_v_double,
                 };
                 self.conn.grab_pointer(Some(cursor))?;
                 return Ok(());
@@ -1121,10 +1121,10 @@ impl WindowManager {
         }
 
         if let Some(dir) = new_direction {
-            // Set resize cursor on root
+            // Set resize cursor on root (double-arrow cursors)
             let cursor = match dir {
-                Direction::Left | Direction::Right => self.conn.cursor_left,
-                Direction::Up | Direction::Down => self.conn.cursor_top,
+                Direction::Left | Direction::Right => self.conn.cursor_h_double,
+                Direction::Up | Direction::Down => self.conn.cursor_v_double,
             };
             self.conn.set_window_cursor(self.conn.root, cursor)?;
             self.conn.flush()?;
