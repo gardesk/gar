@@ -202,7 +202,7 @@ checksum = "f449e6c6c08c865631d4890cfacf252b3d396c9bcc83adb6623cdb02a8336c41"
 
 [[package]]
 name = "gar"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dirs",
  "libc",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "garctl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "serde",

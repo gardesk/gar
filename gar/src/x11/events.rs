@@ -723,8 +723,8 @@ impl WindowManager {
 
         // Check for edge resize on TILED windows (click on gap between windows, no mod key)
         if !has_mod && event.detail == 1 {
-            let screen = self.screen_rect();
-            let geometries = self.current_workspace().tree.calculate_geometries(screen);
+            let work_area = self.work_area();
+            let geometries = self.current_workspace().tree.calculate_geometries(work_area);
 
             if let Some((window, direction, container_size)) =
                 self.find_tiled_edge(event.root_x, event.root_y, &geometries)

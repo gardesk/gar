@@ -167,6 +167,25 @@ impl WindowManager {
         self.monitors[self.focused_monitor].geometry
     }
 
+    /// Get the work area for the focused monitor (accounting for struts and outer gaps).
+    pub fn work_area(&self) -> Rect {
+        let screen = self.screen_rect();
+        let gap_outer = self.config.gap_outer as i16;
+
+        // Calculate struts for focused monitor
+        let (strut_left, strut_right, strut_top, strut_bottom) =
+            self.calculate_struts(self.focused_monitor);
+
+        Rect::new(
+            screen.x + gap_outer + strut_left as i16,
+            screen.y + gap_outer + strut_top as i16,
+            screen.width
+                .saturating_sub(2 * gap_outer as u16 + strut_left as u16 + strut_right as u16),
+            screen.height
+                .saturating_sub(2 * gap_outer as u16 + strut_top as u16 + strut_bottom as u16),
+        )
+    }
+
     /// Get the rectangle for a specific workspace's monitor.
     pub fn workspace_rect(&self, workspace_idx: usize) -> Rect {
         self.monitor_for_workspace(workspace_idx)
@@ -182,6 +201,27 @@ impl WindowManager {
     /// Find the monitor index currently displaying a workspace (i3-style).
     pub fn monitor_idx_for_workspace(&self, workspace_idx: usize) -> Option<usize> {
         self.monitors.iter().position(|m| m.active_workspace == workspace_idx)
+    }
+
+    /// Calculate struts (reserved space for panels/docks) for a monitor.
+    fn calculate_struts(&self, _monitor_idx: usize) -> (u32, u32, u32, u32) {
+        if self.config.bar_height > 0 {
+            // Manual bar height overrides struts (assumes bar at top)
+            (0, 0, self.config.bar_height, 0)
+        } else {
+            // Accumulate struts from dock windows
+            let mut left: u32 = 0;
+            let mut right: u32 = 0;
+            let mut top: u32 = 0;
+            let mut bottom: u32 = 0;
+            for strut in self.dock_struts.values() {
+                left = left.max(strut.left);
+                right = right.max(strut.right);
+                top = top.max(strut.top);
+                bottom = bottom.max(strut.bottom);
+            }
+            (left, right, top, bottom)
+        }
     }
 
     /// Refresh monitors (called on RandR screen change).
