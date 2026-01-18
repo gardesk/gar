@@ -718,9 +718,15 @@ impl WindowManager {
             let work_area = self.work_area();
             let geometries = self.current_workspace().tree.calculate_geometries(work_area);
 
-            if let Some((window, direction, container_size)) =
-                self.find_tiled_edge(event.root_x, event.root_y, &geometries)
-            {
+            tracing::debug!(
+                "Tiled edge check: pos=({},{}), work_area={:?}, geometries={:?}",
+                event.root_x, event.root_y, work_area, geometries
+            );
+
+            let edge_result = self.find_tiled_edge(event.root_x, event.root_y, &geometries);
+            tracing::debug!("find_tiled_edge result: {:?}", edge_result);
+
+            if let Some((window, direction, container_size)) = edge_result {
                 // Get current ratio from tree
                 let start_ratio = self
                     .current_workspace()
@@ -1105,28 +1111,37 @@ impl WindowManager {
 
         let edge = self.find_tiled_edge(root_x, root_y, &geometries);
 
-        let new_direction = edge.map(|(_, dir, _)| dir);
+        let new_state = edge.map(|(w, dir, _)| (w, dir));
 
         // Check if cursor state changed
-        if new_direction == self.tiled_edge_cursor {
+        if new_state.map(|(_, d)| d) == self.tiled_edge_cursor {
             return Ok(()); // No change
         }
 
-        if let Some(dir) = new_direction {
-            // Set resize cursor on root (double-arrow cursors)
+        // Clear old cursor state
+        if self.tiled_edge_cursor.is_some() {
+            // Clear cursor on all tiled windows and root
+            for (win, _) in &geometries {
+                self.conn.clear_window_cursor(*win)?;
+            }
+            self.conn.clear_window_cursor(self.conn.root)?;
+        }
+
+        if let Some((_, dir)) = new_state {
+            // Set resize cursor on all tiled windows AND root
+            // This ensures cursor shows even when mouse is over a window
             let cursor = match dir {
                 Direction::Left | Direction::Right => self.conn.cursor_h_double,
                 Direction::Up | Direction::Down => self.conn.cursor_v_double,
             };
+            for (win, _) in &geometries {
+                self.conn.set_window_cursor(*win, cursor)?;
+            }
             self.conn.set_window_cursor(self.conn.root, cursor)?;
-            self.conn.flush()?;
-        } else if self.tiled_edge_cursor.is_some() {
-            // Clear resize cursor from root
-            self.conn.clear_window_cursor(self.conn.root)?;
             self.conn.flush()?;
         }
 
-        self.tiled_edge_cursor = new_direction;
+        self.tiled_edge_cursor = new_state.map(|(_, d)| d);
         Ok(())
     }
 
