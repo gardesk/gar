@@ -268,6 +268,15 @@ impl LuaConfig {
                         }
                     }
                 }
+                "border_color_swap_target" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            if let Some(color) = parse_color(&str_val) {
+                                state.config.border_color_swap_target = color;
+                            }
+                        }
+                    }
+                }
                 "gap_inner" => {
                     if let Value::Integer(v) = value {
                         state.config.gap_inner = v as u32;

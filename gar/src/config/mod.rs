@@ -19,6 +19,7 @@ pub struct Config {
     pub border_color_focused: u32,
     pub border_color_unfocused: u32,
     pub border_color_urgent: u32,
+    pub border_color_swap_target: u32,
     pub gap_inner: u32,
     pub gap_outer: u32,
     // Title bar settings
@@ -392,6 +393,7 @@ impl Default for Config {
             border_color_focused: 0x5294e2,
             border_color_unfocused: 0x2d2d2d,
             border_color_urgent: 0xff5555, // Red for urgent windows
+            border_color_swap_target: 0x00ff00, // Green for drag-swap target
             gap_inner: 0,
             gap_outer: 0,
             // Title bars disabled by default

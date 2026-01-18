@@ -202,6 +202,21 @@ pub enum DragState {
         start_geometry: Rect,
         edge: ResizeEdge,
     },
+    /// Dragging a tiled window to swap with another
+    TiledSwap {
+        window: u32,
+        /// Grab point offset from window origin (for smooth dragging)
+        grab_offset_x: i16,
+        grab_offset_y: i16,
+        /// Original tree state for reverting if cancelled
+        original_tree: Node,
+        /// Cached geometries of all tiled windows (updated after swaps)
+        tiled_geometries: Vec<(u32, Rect)>,
+        /// Currently hovered swap target (for visual feedback)
+        hover_target: Option<u32>,
+        /// Original workspace index
+        workspace: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -556,6 +571,19 @@ impl WindowManager {
     fn handle_destroy_notify(&mut self, event: DestroyNotifyEvent) -> Result<()> {
         tracing::debug!("DestroyNotify for window {}", event.window);
 
+        // Clean up drag state if the destroyed window was involved in a drag
+        if let Some(ref drag) = self.drag_state {
+            let drag_window = match drag {
+                DragState::Move { window, .. } |
+                DragState::Resize { window, .. } |
+                DragState::TiledSwap { window, .. } => *window,
+            };
+            if drag_window == event.window {
+                self.drag_state = None;
+                let _ = self.conn.ungrab_pointer();
+            }
+        }
+
         // Check if this was a dock window with struts
         if self.dock_struts.remove(&event.window).is_some() {
             tracing::info!("Dock window {} destroyed, removing strut", event.window);
@@ -638,6 +666,41 @@ impl WindowManager {
                 self.conn.clear_window_cursor(target)?;
                 let cursor = self.cursor_for_edge(edge);
                 self.conn.grab_pointer(Some(cursor))?;
+                return Ok(());
+            }
+        }
+
+        // Mod+Button1 on TILED window = swap drag
+        if has_mod && !self.is_floating(target) && self.windows.contains_key(&target) && event.detail == 1 {
+            if self.current_workspace().tree.contains(target) {
+                let screen = self.screen_rect();
+                let tiled_geometries = self.current_workspace()
+                    .tree
+                    .calculate_geometries(screen);
+                let original_tree = self.current_workspace().tree.clone();
+
+                // Calculate grab offset from window origin for smooth dragging
+                let window_geom = tiled_geometries.iter()
+                    .find(|(w, _)| *w == target)
+                    .map(|(_, r)| *r)
+                    .unwrap_or_default();
+                let grab_offset_x = event.root_x - window_geom.x;
+                let grab_offset_y = event.root_y - window_geom.y;
+
+                tracing::debug!("Starting tiled swap drag for window {}, offset=({},{})",
+                    target, grab_offset_x, grab_offset_y);
+                self.drag_state = Some(DragState::TiledSwap {
+                    window: target,
+                    grab_offset_x,
+                    grab_offset_y,
+                    original_tree,
+                    tiled_geometries,
+                    hover_target: None,
+                    workspace: self.focused_workspace,
+                });
+                // Raise the dragged window above others
+                self.conn.raise_window(target)?;
+                self.conn.grab_pointer(Some(self.conn.cursor_move))?;
                 return Ok(());
             }
         }
@@ -725,16 +788,42 @@ impl WindowManager {
         if let Some(drag) = self.drag_state.take() {
             tracing::debug!("Ending drag operation");
             self.conn.ungrab_pointer()?;
-            self.conn.flush()?;
 
-            // Restore edge cursor if pointer is still over the dragged floating window
-            let window = match drag {
-                DragState::Move { window, .. } | DragState::Resize { window, .. } => window,
-            };
-            if self.is_floating(window) {
-                // Use the release event position to update cursor
-                self.update_edge_cursor(window, event.root_x, event.root_y)?;
+            match drag {
+                DragState::TiledSwap { window, hover_target, workspace, original_tree, .. } => {
+                    // Restore target border color
+                    if let Some(target) = hover_target {
+                        let color = if self.focused_window == Some(target) {
+                            self.config.border_color_focused
+                        } else {
+                            self.config.border_color_unfocused
+                        };
+                        self.conn.set_border(target, self.config.border_width, color)?;
+                    }
+
+                    // Finalize: snap window to its layout position
+                    if workspace == self.focused_workspace {
+                        // Swaps already happened live during motion
+                        // Just re-apply layout to snap dragged window to final position
+                        self.apply_layout()?;
+                        self.set_focus(window, true)?;
+                    } else {
+                        // Workspace changed during drag - revert to original
+                        self.workspaces[workspace].tree = original_tree;
+                        if workspace == self.focused_workspace {
+                            self.apply_layout()?;
+                        }
+                    }
+                }
+                DragState::Move { window, .. } | DragState::Resize { window, .. } => {
+                    // Restore edge cursor if pointer is still over the dragged floating window
+                    if self.is_floating(window) {
+                        self.update_edge_cursor(window, event.root_x, event.root_y)?;
+                    }
+                }
             }
+
+            self.conn.flush()?;
         }
         Ok(())
     }
@@ -785,6 +874,85 @@ impl WindowManager {
 
                 let window = *window;
                 self.set_floating_geometry(window, new_x, new_y, new_w, new_h)?;
+            }
+            DragState::TiledSwap {
+                window,
+                grab_offset_x,
+                grab_offset_y,
+                tiled_geometries,
+                hover_target,
+                workspace,
+                ..
+            } => {
+                // Only process if still on same workspace
+                if *workspace != self.focused_workspace {
+                    return Ok(());
+                }
+
+                let cursor_x = event.root_x;
+                let cursor_y = event.root_y;
+                let dragged = *window;
+                let old_target = *hover_target;
+                let grab_offset_x = *grab_offset_x;
+                let grab_offset_y = *grab_offset_y;
+
+                // Move dragged window to follow cursor using fixed grab offset
+                let new_x = cursor_x - grab_offset_x;
+                let new_y = cursor_y - grab_offset_y;
+                self.conn.move_window(dragged, new_x, new_y)?;
+                self.conn.flush()?;
+
+                // Find window under cursor (excluding dragged window)
+                let new_target = tiled_geometries.iter()
+                    .find(|(w, rect)| {
+                        *w != dragged &&
+                        cursor_x >= rect.x && cursor_x < rect.x + rect.width as i16 &&
+                        cursor_y >= rect.y && cursor_y < rect.y + rect.height as i16
+                    })
+                    .map(|(w, _)| *w);
+
+                // Perform live swap if target changed
+                if new_target != old_target {
+                    // Restore old target border
+                    if let Some(old) = old_target {
+                        let color = if self.focused_window == Some(old) {
+                            self.config.border_color_focused
+                        } else {
+                            self.config.border_color_unfocused
+                        };
+                        self.conn.set_border(old, self.config.border_width, color)?;
+                    }
+
+                    // Perform actual swap if new target exists
+                    if let Some(target) = new_target {
+                        // Swap in tree and relayout (live preview)
+                        self.current_workspace_mut().tree.swap(dragged, target);
+                        self.apply_layout()?;
+
+                        // Re-raise dragged window above others
+                        self.conn.raise_window(dragged)?;
+
+                        // Highlight new target
+                        self.conn.set_border(target, self.config.border_width,
+                            self.config.border_color_swap_target)?;
+
+                        // Update cached geometries after swap
+                        let screen = self.screen_rect();
+                        let new_geometries = self.current_workspace()
+                            .tree
+                            .calculate_geometries(screen);
+                        if let Some(DragState::TiledSwap { tiled_geometries: tg, hover_target: ht, .. }) = &mut self.drag_state {
+                            *tg = new_geometries;
+                            *ht = new_target;
+                        }
+                    } else {
+                        // No new target, just update hover state
+                        if let Some(DragState::TiledSwap { hover_target: ht, .. }) = &mut self.drag_state {
+                            *ht = new_target;
+                        }
+                    }
+                    self.conn.flush()?;
+                }
             }
         }
 

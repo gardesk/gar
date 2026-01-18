@@ -2,7 +2,7 @@ use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ButtonIndex, ChangeWindowAttributesAux, ClientMessageData,
     ClientMessageEvent, ConfigureWindowAux, ConnectionExt, EventMask, Font, GrabMode, InputFocus,
-    ModMask, Screen, Window,
+    ModMask, Screen, StackMode, Window,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
@@ -539,6 +539,20 @@ impl Connection {
     /// Unmap (hide) a window.
     pub fn unmap_window(&self, window: Window) -> Result<(), Error> {
         self.conn.unmap_window(window)?;
+        Ok(())
+    }
+
+    /// Raise a window to the top of the stacking order.
+    pub fn raise_window(&self, window: Window) -> Result<(), Error> {
+        let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+        self.conn.configure_window(window, &aux)?;
+        Ok(())
+    }
+
+    /// Move a window to a new position without changing size.
+    pub fn move_window(&self, window: Window, x: i16, y: i16) -> Result<(), Error> {
+        let aux = ConfigureWindowAux::new().x(x as i32).y(y as i32);
+        self.conn.configure_window(window, &aux)?;
         Ok(())
     }
 

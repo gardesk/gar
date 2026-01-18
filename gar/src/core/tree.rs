@@ -14,7 +14,7 @@ pub enum Direction {
     Down,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Node {
     Internal {
         split: SplitDirection,
