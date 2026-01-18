@@ -1223,40 +1223,46 @@ impl WindowManager {
         let preferred = self.directional_focus_memory.get(&(focused, direction)).copied();
 
         if let Some(target) = Node::find_adjacent(&geometries, focused, direction, preferred) {
+            // Check if memory was used (preferred matched target) or default algorithm was used
+            let used_memory = preferred == Some(target);
+
             // Store the directional focus memory for next time
             self.directional_focus_memory.insert((focused, direction), target);
 
-            // Store reverse direction only if windows are aligned (same row/column)
-            // This enables "back" navigation without breaking natural movement
-            if let (Some((_, from_rect)), Some((_, to_rect))) = (
-                geometries.iter().find(|(w, _)| *w == focused),
-                geometries.iter().find(|(w, _)| *w == target),
-            ) {
-                let dominated = match direction {
-                    // For Left/Right: store reverse if windows share vertical space (same row)
-                    Direction::Left | Direction::Right => {
-                        let overlap_start = from_rect.y.max(to_rect.y);
-                        let overlap_end = (from_rect.y + from_rect.height as i16)
-                            .min(to_rect.y + to_rect.height as i16);
-                        overlap_start < overlap_end
-                    }
-                    // For Up/Down: store reverse if windows share horizontal space (same column)
-                    Direction::Up | Direction::Down => {
-                        let overlap_start = from_rect.x.max(to_rect.x);
-                        let overlap_end = (from_rect.x + from_rect.width as i16)
-                            .min(to_rect.x + to_rect.width as i16);
-                        overlap_start < overlap_end
-                    }
-                };
-
-                if dominated {
-                    let opposite = match direction {
-                        Direction::Left => Direction::Right,
-                        Direction::Right => Direction::Left,
-                        Direction::Up => Direction::Down,
-                        Direction::Down => Direction::Up,
+            // Store reverse direction only if:
+            // 1. Default algorithm was used (not memory-assisted jump that skipped windows)
+            // 2. Windows are aligned (same row/column)
+            if !used_memory {
+                if let (Some((_, from_rect)), Some((_, to_rect))) = (
+                    geometries.iter().find(|(w, _)| *w == focused),
+                    geometries.iter().find(|(w, _)| *w == target),
+                ) {
+                    let dominated = match direction {
+                        // For Left/Right: store reverse if windows share vertical space (same row)
+                        Direction::Left | Direction::Right => {
+                            let overlap_start = from_rect.y.max(to_rect.y);
+                            let overlap_end = (from_rect.y + from_rect.height as i16)
+                                .min(to_rect.y + to_rect.height as i16);
+                            overlap_start < overlap_end
+                        }
+                        // For Up/Down: store reverse if windows share horizontal space (same column)
+                        Direction::Up | Direction::Down => {
+                            let overlap_start = from_rect.x.max(to_rect.x);
+                            let overlap_end = (from_rect.x + from_rect.width as i16)
+                                .min(to_rect.x + to_rect.width as i16);
+                            overlap_start < overlap_end
+                        }
                     };
-                    self.directional_focus_memory.insert((target, opposite), focused);
+
+                    if dominated {
+                        let opposite = match direction {
+                            Direction::Left => Direction::Right,
+                            Direction::Right => Direction::Left,
+                            Direction::Up => Direction::Down,
+                            Direction::Down => Direction::Up,
+                        };
+                        self.directional_focus_memory.insert((target, opposite), focused);
+                    }
                 }
             }
 
