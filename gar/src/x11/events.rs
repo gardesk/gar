@@ -713,52 +713,59 @@ impl WindowManager {
             }
         }
 
-        // Check for edge resize on TILED windows (click on gap between windows, no mod key)
-        if !has_mod && event.detail == 1 {
+        // Check for edge resize on TILED windows (click near edge with adjacent window)
+        if !has_mod && event.detail == 1 && self.windows.contains_key(&window) && !self.is_floating(window) {
             let work_area = self.work_area();
             let geometries = self.current_workspace().tree.calculate_geometries(work_area);
 
-            tracing::debug!(
-                "Tiled edge check: pos=({},{}), work_area={:?}, geometries={:?}",
-                event.root_x, event.root_y, work_area, geometries
-            );
+            // Find the geometry of the clicked window
+            if let Some((_, my_rect)) = geometries.iter().find(|(w, _)| *w == window) {
+                let my_rect = *my_rect;
+                if let Some((w1, w2, direction)) =
+                    self.find_tiled_resize_edge(window, &my_rect, event.root_x, event.root_y, &geometries)
+                {
+                    // Calculate container size from both windows
+                    let other_rect = geometries.iter().find(|(w, _)| *w == if w1 == window { w2 } else { w1 }).map(|(_, r)| r);
+                    let container_size = if let Some(other) = other_rect {
+                        match direction {
+                            Direction::Left | Direction::Right => my_rect.width + other.width,
+                            Direction::Up | Direction::Down => my_rect.height + other.height,
+                        }
+                    } else {
+                        match direction {
+                            Direction::Left | Direction::Right => my_rect.width * 2,
+                            Direction::Up | Direction::Down => my_rect.height * 2,
+                        }
+                    };
 
-            let edge_result = self.find_tiled_edge(event.root_x, event.root_y, &geometries);
-            tracing::debug!("find_tiled_edge result: {:?}", edge_result);
+                    // Get current ratio from tree (use w1 which is the "left/top" window)
+                    let start_ratio = self
+                        .current_workspace()
+                        .tree
+                        .get_split_ratio(w1, direction)
+                        .unwrap_or(0.5);
 
-            if let Some((window, _window2, direction, container_size)) = edge_result {
-                // Get current ratio from tree
-                let start_ratio = self
-                    .current_workspace()
-                    .tree
-                    .get_split_ratio(window, direction)
-                    .unwrap_or(0.5);
+                    let start_pos = match direction {
+                        Direction::Left | Direction::Right => event.root_x,
+                        Direction::Up | Direction::Down => event.root_y,
+                    };
 
-                let start_pos = match direction {
-                    Direction::Left | Direction::Right => event.root_x,
-                    Direction::Up | Direction::Down => event.root_y,
-                };
+                    self.drag_state = Some(DragState::TiledResize {
+                        direction,
+                        start_pos,
+                        start_ratio,
+                        window: w1,
+                        container_size,
+                        workspace: self.focused_workspace,
+                    });
 
-                tracing::debug!(
-                    "Starting tiled edge resize: window={}, direction={:?}, ratio={}, container={}",
-                    window, direction, start_ratio, container_size
-                );
-
-                self.drag_state = Some(DragState::TiledResize {
-                    direction,
-                    start_pos,
-                    start_ratio,
-                    window,
-                    container_size,
-                    workspace: self.focused_workspace,
-                });
-
-                let cursor = match direction {
-                    Direction::Left | Direction::Right => self.conn.cursor_h_double,
-                    Direction::Up | Direction::Down => self.conn.cursor_v_double,
-                };
-                self.conn.grab_pointer(Some(cursor))?;
-                return Ok(());
+                    let cursor = match direction {
+                        Direction::Left | Direction::Right => self.conn.cursor_h_double,
+                        Direction::Up | Direction::Down => self.conn.cursor_v_double,
+                    };
+                    self.conn.grab_pointer(Some(cursor))?;
+                    return Ok(());
+                }
             }
         }
 
@@ -889,14 +896,23 @@ impl WindowManager {
     }
 
     fn handle_motion_notify(&mut self, event: MotionNotifyEvent) -> Result<()> {
-        // If not in a drag, check for edge cursor changes on floating windows
+        // If not in a drag, check for edge cursor changes
         if self.drag_state.is_none() {
             let window = event.event;
-            if self.windows.contains_key(&window) && self.is_floating(window) {
-                self.update_edge_cursor(window, event.root_x, event.root_y)?;
-            } else {
-                // Check for tiled edge hover (for cursor feedback)
-                self.update_tiled_edge_cursor(event.root_x, event.root_y)?;
+            if self.windows.contains_key(&window) {
+                if self.is_floating(window) {
+                    self.update_edge_cursor(window, event.root_x, event.root_y)?;
+                } else {
+                    // Check for tiled edge hover (for cursor feedback)
+                    self.update_tiled_edge_cursor(window, event.root_x, event.root_y)?;
+                }
+            } else if self.tiled_edge_cursor.is_some() {
+                // Moving to unmanaged window or root - clear tiled edge cursor
+                let (old_w1, old_w2, _) = self.tiled_edge_cursor.unwrap();
+                self.conn.clear_window_cursor(old_w1)?;
+                self.conn.clear_window_cursor(old_w2)?;
+                self.conn.flush()?;
+                self.tiled_edge_cursor = None;
             }
             return Ok(());
         }
@@ -1104,41 +1120,144 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Update cursor when hovering over tiled window edges/gaps.
-    fn update_tiled_edge_cursor(&mut self, root_x: i16, root_y: i16) -> Result<()> {
+    /// Update cursor when hovering near edges of tiled windows.
+    /// Called with the window that received the motion event.
+    fn update_tiled_edge_cursor(&mut self, window: u32, root_x: i16, root_y: i16) -> Result<()> {
         let work_area = self.work_area();
         let geometries = self.current_workspace().tree.calculate_geometries(work_area);
 
-        let edge = self.find_tiled_edge(root_x, root_y, &geometries);
+        // Find the geometry of the window we're over
+        let my_geometry = geometries.iter().find(|(w, _)| *w == window).map(|(_, r)| r);
 
-        let new_state = edge.map(|(w1, w2, dir, _)| (w1, w2, dir));
+        let new_state = if let Some(my_rect) = my_geometry {
+            // Check if we're near an edge of this window that has an adjacent window
+            self.find_tiled_resize_edge(window, my_rect, root_x, root_y, &geometries)
+        } else {
+            None
+        };
 
         // Check if cursor state changed
         if new_state == self.tiled_edge_cursor {
             return Ok(()); // No change
         }
 
-        // Clear old cursor state on the specific windows that had it
+        // Clear old cursor state
         if let Some((old_w1, old_w2, _)) = self.tiled_edge_cursor {
             self.conn.clear_window_cursor(old_w1)?;
             self.conn.clear_window_cursor(old_w2)?;
-            self.conn.clear_window_cursor(self.conn.root)?;
         }
 
         if let Some((w1, w2, dir)) = new_state {
-            // Set resize cursor on the two windows sharing the edge AND root
+            // Set resize cursor on both windows sharing the edge
             let cursor = match dir {
                 Direction::Left | Direction::Right => self.conn.cursor_h_double,
                 Direction::Up | Direction::Down => self.conn.cursor_v_double,
             };
             self.conn.set_window_cursor(w1, cursor)?;
             self.conn.set_window_cursor(w2, cursor)?;
-            self.conn.set_window_cursor(self.conn.root, cursor)?;
         }
         self.conn.flush()?;
 
         self.tiled_edge_cursor = new_state;
         Ok(())
+    }
+
+    /// Find if cursor is near an edge of the given window that has an adjacent tiled window.
+    /// Returns (this_window, adjacent_window, direction) if on a resizable edge.
+    fn find_tiled_resize_edge(
+        &self,
+        window: u32,
+        rect: &Rect,
+        x: i16,
+        y: i16,
+        geometries: &[(u32, Rect)],
+    ) -> Option<(u32, u32, Direction)> {
+        const EDGE_ZONE: i16 = 16; // Detection zone from window edge
+        let gap = self.config.gap_inner as i16;
+
+        let left = rect.x;
+        let right = rect.x + rect.width as i16;
+        let top = rect.y;
+        let bottom = rect.y + rect.height as i16;
+
+        // Check each edge
+        let near_left = x >= left && x < left + EDGE_ZONE;
+        let near_right = x > right - EDGE_ZONE && x <= right;
+        let near_top = y >= top && y < top + EDGE_ZONE;
+        let near_bottom = y > bottom - EDGE_ZONE && y <= bottom;
+
+        // For each edge we're near, look for an adjacent window
+        if near_left {
+            // Look for window to our left
+            for (other_w, other_r) in geometries {
+                if *other_w == window {
+                    continue;
+                }
+                let other_right = other_r.x + other_r.width as i16;
+                // Check if other window's right edge is adjacent to our left edge
+                if (other_right - left).abs() <= gap + 4 {
+                    // Check vertical overlap
+                    let y_overlap = y >= other_r.y.max(top) && y < (other_r.y + other_r.height as i16).min(bottom);
+                    if y_overlap {
+                        return Some((*other_w, window, Direction::Right));
+                    }
+                }
+            }
+        }
+
+        if near_right {
+            // Look for window to our right
+            for (other_w, other_r) in geometries {
+                if *other_w == window {
+                    continue;
+                }
+                // Check if other window's left edge is adjacent to our right edge
+                if (other_r.x - right).abs() <= gap + 4 {
+                    // Check vertical overlap
+                    let y_overlap = y >= other_r.y.max(top) && y < (other_r.y + other_r.height as i16).min(bottom);
+                    if y_overlap {
+                        return Some((window, *other_w, Direction::Right));
+                    }
+                }
+            }
+        }
+
+        if near_top {
+            // Look for window above us
+            for (other_w, other_r) in geometries {
+                if *other_w == window {
+                    continue;
+                }
+                let other_bottom = other_r.y + other_r.height as i16;
+                // Check if other window's bottom edge is adjacent to our top edge
+                if (other_bottom - top).abs() <= gap + 4 {
+                    // Check horizontal overlap
+                    let x_overlap = x >= other_r.x.max(left) && x < (other_r.x + other_r.width as i16).min(right);
+                    if x_overlap {
+                        return Some((*other_w, window, Direction::Down));
+                    }
+                }
+            }
+        }
+
+        if near_bottom {
+            // Look for window below us
+            for (other_w, other_r) in geometries {
+                if *other_w == window {
+                    continue;
+                }
+                // Check if other window's top edge is adjacent to our bottom edge
+                if (other_r.y - bottom).abs() <= gap + 4 {
+                    // Check horizontal overlap
+                    let x_overlap = x >= other_r.x.max(left) && x < (other_r.x + other_r.width as i16).min(right);
+                    if x_overlap {
+                        return Some((window, *other_w, Direction::Down));
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     fn handle_enter_notify(&mut self, event: EnterNotifyEvent) -> Result<()> {
@@ -2356,63 +2475,6 @@ impl WindowManager {
         }
     }
 
-    /// Find if cursor is in the gap between two adjacent tiled windows.
-    /// Returns (window1, window2, direction, container_size) if on a valid shared edge.
-    /// Only matches gaps between windows, NOT outer edges.
-    fn find_tiled_edge(
-        &self,
-        x: i16,
-        y: i16,
-        geometries: &[(u32, Rect)],
-    ) -> Option<(u32, u32, Direction, u16)> {
-        const TILED_EDGE_THRESHOLD: i16 = 16;
-        let gap_tolerance = self.config.gap_inner as i16 + 4;
-
-        for (w1, r1) in geometries {
-            for (w2, r2) in geometries {
-                if w1 >= w2 {
-                    continue;
-                } // Avoid duplicate pairs
-
-                // Check for vertical shared edge (windows side by side)
-                // r1's right edge meets r2's left edge
-                let r1_right = r1.x + r1.width as i16;
-
-                if (r1_right - r2.x).abs() <= gap_tolerance && r1_right <= r2.x {
-                    // Verify vertical overlap (they share a horizontal span)
-                    let y_min = r1.y.max(r2.y);
-                    let y_max = (r1.y + r1.height as i16).min(r2.y + r2.height as i16);
-                    if y_min < y_max && y >= y_min && y < y_max {
-                        // Cursor must be in the gap between them
-                        let gap_center = (r1_right + r2.x) / 2;
-                        if (x - gap_center).abs() <= TILED_EDGE_THRESHOLD {
-                            let container_width = (r1.width + r2.width) as u16;
-                            return Some((*w1, *w2, Direction::Right, container_width));
-                        }
-                    }
-                }
-
-                // Check for horizontal shared edge (windows stacked vertically)
-                // r1's bottom edge meets r2's top edge
-                let r1_bottom = r1.y + r1.height as i16;
-
-                if (r1_bottom - r2.y).abs() <= gap_tolerance && r1_bottom <= r2.y {
-                    // Verify horizontal overlap (they share a vertical span)
-                    let x_min = r1.x.max(r2.x);
-                    let x_max = (r1.x + r1.width as i16).min(r2.x + r2.width as i16);
-                    if x_min < x_max && x >= x_min && x < x_max {
-                        // Cursor must be in the gap between them
-                        let gap_center = (r1_bottom + r2.y) / 2;
-                        if (y - gap_center).abs() <= TILED_EDGE_THRESHOLD {
-                            let container_height = (r1.height + r2.height) as u16;
-                            return Some((*w1, *w2, Direction::Down, container_height));
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
 
     fn get_floating_geometry(&self, window: u32) -> Rect {
         self.windows
