@@ -337,16 +337,12 @@ impl WindowManager {
             let should_float = rule_actions.floating.unwrap_or_else(|| self.conn.should_float(window));
 
             // Subscribe to events on the window
-            // Floating windows get POINTER_MOTION for edge resize cursor feedback
-            let base_events = EventMask::ENTER_WINDOW
+            // All windows get POINTER_MOTION for edge resize cursor feedback
+            let events = EventMask::ENTER_WINDOW
                 | EventMask::FOCUS_CHANGE
                 | EventMask::PROPERTY_CHANGE
-                | EventMask::STRUCTURE_NOTIFY;
-            let events = if should_float {
-                base_events | EventMask::POINTER_MOTION
-            } else {
-                base_events
-            };
+                | EventMask::STRUCTURE_NOTIFY
+                | EventMask::POINTER_MOTION;
             self.conn.select_input(window, events)?;
 
             // Grab button for click-to-focus
@@ -455,16 +451,12 @@ impl WindowManager {
         let should_float = rule_actions.floating.unwrap_or_else(|| self.conn.should_float(window));
 
         // Subscribe to events on the window
-        // Floating windows get POINTER_MOTION for edge resize cursor feedback
-        let base_events = EventMask::ENTER_WINDOW
+        // All windows get POINTER_MOTION for edge resize cursor feedback
+        let events = EventMask::ENTER_WINDOW
             | EventMask::FOCUS_CHANGE
             | EventMask::PROPERTY_CHANGE
-            | EventMask::STRUCTURE_NOTIFY;
-        let events = if should_float {
-            base_events | EventMask::POINTER_MOTION
-        } else {
-            base_events
-        };
+            | EventMask::STRUCTURE_NOTIFY
+            | EventMask::POINTER_MOTION;
         self.conn.select_input(window, events)?;
 
         // Grab button for click-to-focus
@@ -2652,13 +2644,14 @@ impl WindowManager {
                 win.floating = false;
             }
 
-            // Standard event mask for tiled window
+            // Event mask for tiled window (includes POINTER_MOTION for tiled edge resize)
             self.conn.select_input(
                 window,
                 EventMask::ENTER_WINDOW
                     | EventMask::FOCUS_CHANGE
                     | EventMask::PROPERTY_CHANGE
-                    | EventMask::STRUCTURE_NOTIFY,
+                    | EventMask::STRUCTURE_NOTIFY
+                    | EventMask::POINTER_MOTION,
             )?;
 
             // Clear edge cursor state if this window had one
