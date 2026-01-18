@@ -504,6 +504,12 @@ impl Connection {
         Ok(())
     }
 
+    /// Get the current mouse pointer position (root window coordinates).
+    pub fn get_pointer_position(&self) -> Result<(i16, i16), Error> {
+        let reply = self.conn.query_pointer(self.root)?.reply()?;
+        Ok((reply.root_x, reply.root_y))
+    }
+
     /// Set window border width and color.
     pub fn set_border(&self, window: Window, width: u32, color: u32) -> Result<(), Error> {
         let aux = ChangeWindowAttributesAux::new().border_pixel(color);

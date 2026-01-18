@@ -207,6 +207,29 @@ impl WindowManager {
         self.monitors.iter().position(|m| m.active_workspace == workspace_idx)
     }
 
+    /// Find the monitor index containing a point (x, y in root window coordinates).
+    pub fn monitor_idx_at_point(&self, x: i16, y: i16) -> usize {
+        self.monitors
+            .iter()
+            .position(|m| {
+                let g = &m.geometry;
+                x >= g.x && x < g.x + g.width as i16 &&
+                y >= g.y && y < g.y + g.height as i16
+            })
+            .unwrap_or(self.focused_monitor) // Fallback to focused monitor
+    }
+
+    /// Get the workspace that should receive new windows (based on mouse position).
+    /// This supports spawning windows on the monitor where the mouse is.
+    pub fn workspace_for_new_window(&self) -> usize {
+        if let Ok((x, y)) = self.conn.get_pointer_position() {
+            let monitor_idx = self.monitor_idx_at_point(x, y);
+            self.monitors[monitor_idx].active_workspace
+        } else {
+            self.focused_workspace
+        }
+    }
+
     /// Calculate struts (reserved space for panels/docks) for a monitor.
     fn calculate_struts(&self, _monitor_idx: usize) -> (u32, u32, u32, u32) {
         if self.config.bar_height > 0 {
@@ -599,6 +622,17 @@ impl WindowManager {
         if let Some(old) = self.focused_window {
             if old != window {
                 let _ = self.conn.grab_button(old);
+            }
+        }
+
+        // Update focused workspace and monitor based on the window's workspace
+        // This is critical for focus-follows-mouse to work correctly with multimonitor
+        if let Some(win) = self.windows.get(&window) {
+            let ws_idx = win.workspace;
+            self.focused_workspace = ws_idx;
+            // Update focused_monitor to the monitor displaying this workspace (if visible)
+            if let Some(monitor_idx) = self.monitor_idx_for_workspace(ws_idx) {
+                self.focused_monitor = monitor_idx;
             }
         }
 

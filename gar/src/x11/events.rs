@@ -493,9 +493,15 @@ impl WindowManager {
         // Check window rules first
         let rule_actions = self.check_rules(window);
 
-        // Determine target workspace (rule or current)
-        let target_workspace = rule_actions.workspace.unwrap_or(self.focused_workspace + 1);
-        let target_idx = target_workspace.saturating_sub(1).min(self.workspaces.len() - 1);
+        // Determine target workspace: rule > mouse position > focused
+        // This makes windows spawn on the monitor where the mouse is
+        let target_idx = if let Some(ws) = rule_actions.workspace {
+            // Rule specifies workspace (1-indexed)
+            ws.saturating_sub(1).min(self.workspaces.len() - 1)
+        } else {
+            // Use workspace of monitor under mouse pointer
+            self.workspace_for_new_window()
+        };
 
         // Determine if window should float (rule > ICCCM/EWMH hints)
         let should_float = rule_actions.floating.unwrap_or_else(|| self.conn.should_float(window));
