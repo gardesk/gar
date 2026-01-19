@@ -519,27 +519,27 @@ impl WindowManager {
         self.conn.grab_button(window)?;
 
         // Manage window on target workspace
-        if target_idx != self.focused_workspace {
-            // Window goes to a different workspace
-            if should_float {
+        let target_visible = self.is_workspace_visible(target_idx);
+
+        if should_float {
+            if target_idx == self.focused_workspace {
+                self.manage_window_floating(window);
+            } else {
                 self.manage_window_floating_on_workspace(window, target_idx);
+            }
+        } else {
+            if target_idx == self.focused_workspace {
+                self.manage_window(window);
             } else {
                 self.manage_window_on_workspace(window, target_idx);
             }
-            // Create frame if title bars enabled
-            self.create_frame_for_window(window);
-            // Don't map - it's on another workspace
-        } else {
-            // Window goes to current workspace
-            if should_float {
-                self.manage_window_floating(window);
-            } else {
-                self.manage_window(window);
-            }
-            // Create frame if title bars enabled
-            let frame = self.create_frame_for_window(window);
+        }
 
-            // Map the window (and frame if present)
+        // Create frame if title bars enabled
+        let frame = self.create_frame_for_window(window);
+
+        // Map window if it's on a visible workspace (any monitor)
+        if target_visible {
             if frame.is_some() {
                 self.frames.map_frame(&self.conn.conn, window)?;
             }
@@ -549,8 +549,8 @@ impl WindowManager {
         // Apply layout to all windows
         self.apply_layout()?;
 
-        // Focus the new window (only if on current workspace)
-        if target_idx == self.focused_workspace {
+        // Focus the new window if on a visible workspace
+        if target_visible {
             self.set_focus(window, true)?;
         }
 
