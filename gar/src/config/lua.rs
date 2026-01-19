@@ -491,6 +491,21 @@ impl LuaConfig {
                         }
                     }
                 }
+                // Monitor ordering: list of monitor names in left-to-right order
+                "monitor_order" => {
+                    if let Value::Table(t) = value {
+                        let mut order = Vec::new();
+                        for pair in t.pairs::<i64, String>() {
+                            if let Ok((_, name)) = pair {
+                                order.push(name);
+                            }
+                        }
+                        if !order.is_empty() {
+                            tracing::info!("Monitor order configured: {:?}", order);
+                            state.config.monitor_order = order;
+                        }
+                    }
+                }
                 _ => {
                     tracing::warn!("Unknown config key: {}", key);
                 }

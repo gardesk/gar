@@ -35,6 +35,9 @@ pub struct Config {
     pub bar_height: u32,
     // garbar integration: spawn garbar automatically if gar.bar is configured
     pub bar_enabled: bool,
+    // Monitor ordering: list of monitor names in desired left-to-right order
+    // If empty, monitors are sorted by X position (default)
+    pub monitor_order: Vec<String>,
     // Compositor visual settings (picom)
     // These are stored for reference and potential dynamic picom config generation
     pub corner_radius: u32,
@@ -410,6 +413,8 @@ impl Default for Config {
             bar_height: 0,
             // garbar not enabled by default (enabled when gar.bar table is set)
             bar_enabled: false,
+            // Monitor order: empty = sort by X position
+            monitor_order: Vec::new(),
             // Compositor settings (picom) - matching picom.conf defaults
             corner_radius: 12,
             blur_enabled: true,

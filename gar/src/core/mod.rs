@@ -120,6 +120,9 @@ impl WindowManager {
             ));
         }
 
+        // Sort monitors by configured order (if set)
+        Self::sort_monitors_by_config(&mut monitors, &config.monitor_order);
+
         // i3-style: each monitor starts with one workspace (1, 2, 3...)
         // Any workspace can be moved to any monitor dynamically
         for (i, monitor) in monitors.iter_mut().enumerate() {
@@ -230,6 +233,36 @@ impl WindowManager {
         }
     }
 
+    /// Sort monitors by configured order (from gar.set("monitor_order", {...})).
+    /// If config order is empty or doesn't cover all monitors, falls back to X position.
+    fn sort_monitors_by_config(monitors: &mut Vec<Monitor>, config_order: &[String]) {
+        if config_order.is_empty() {
+            // No custom order - sort by X position (default)
+            monitors.sort_by_key(|m| m.geometry.x);
+            return;
+        }
+
+        monitors.sort_by(|a, b| {
+            let pos_a = config_order.iter().position(|n| n == &a.name);
+            let pos_b = config_order.iter().position(|n| n == &b.name);
+
+            match (pos_a, pos_b) {
+                (Some(pa), Some(pb)) => pa.cmp(&pb),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.geometry.x.cmp(&b.geometry.x),
+            }
+        });
+
+        tracing::info!("Sorted monitors by config order:");
+        for (i, m) in monitors.iter().enumerate() {
+            tracing::info!(
+                "  Monitor {}: '{}' at ({}, {}) size {}x{}",
+                i, m.name, m.geometry.x, m.geometry.y, m.geometry.width, m.geometry.height
+            );
+        }
+    }
+
     /// Calculate struts (reserved space for panels/docks) for a monitor.
     fn calculate_struts(&self, _monitor_idx: usize) -> (u32, u32, u32, u32) {
         if self.config.bar_height > 0 {
@@ -267,6 +300,9 @@ impl WindowManager {
                 Rect::new(0, 0, self.conn.screen_width, self.conn.screen_height),
             ));
         }
+
+        // Sort monitors by configured order (if set)
+        Self::sort_monitors_by_config(&mut new_monitors, &self.config.monitor_order);
 
         // Try to preserve workspace assignments from old monitors
         // If we have more monitors now, new ones get next available workspaces
