@@ -2196,6 +2196,9 @@ impl WindowManager {
             tracing::warn!("Failed to regenerate picom config: {}", e);
         }
 
+        // Apply screen timeout/DPMS settings
+        self.config.apply_screen_timeout();
+
         // Re-register keybinds
         self.setup_grabs()?;
 

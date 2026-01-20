@@ -506,6 +506,19 @@ impl LuaConfig {
                         }
                     }
                 }
+                // Screen timeout settings
+                "screen_timeout_enabled" => {
+                    if let Value::Boolean(v) = value {
+                        state.config.screen_timeout_enabled = v;
+                        tracing::info!("Screen timeout enabled: {}", v);
+                    }
+                }
+                "screen_timeout" => {
+                    if let Value::Integer(v) = value {
+                        state.config.screen_timeout_seconds = v as u32;
+                        tracing::info!("Screen timeout set to {} seconds", v);
+                    }
+                }
                 _ => {
                     tracing::warn!("Unknown config key: {}", key);
                 }

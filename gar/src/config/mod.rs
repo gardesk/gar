@@ -38,6 +38,9 @@ pub struct Config {
     // Monitor ordering: list of monitor names in desired left-to-right order
     // If empty, monitors are sorted by X position (default)
     pub monitor_order: Vec<String>,
+    // Screen timeout/DPMS settings
+    pub screen_timeout_enabled: bool,
+    pub screen_timeout_seconds: u32,
     // Compositor visual settings (picom)
     // These are stored for reference and potential dynamic picom config generation
     pub corner_radius: u32,
@@ -345,6 +348,66 @@ wintypes:
         Ok(())
     }
 
+    /// Apply screen timeout/DPMS settings using xset
+    pub fn apply_screen_timeout(&self) {
+        use std::process::Command;
+
+        if self.screen_timeout_enabled {
+            // Enable DPMS and set timeout
+            let timeout = self.screen_timeout_seconds.to_string();
+            match Command::new("xset")
+                .args(["dpms", &timeout, &timeout, &timeout])
+                .status()
+            {
+                Ok(status) if status.success() => {
+                    tracing::info!("Set DPMS timeout to {} seconds", self.screen_timeout_seconds);
+                }
+                Ok(_) => tracing::warn!("xset dpms command failed"),
+                Err(e) => tracing::warn!("Failed to run xset: {}", e),
+            }
+
+            // Enable screen saver with same timeout
+            match Command::new("xset")
+                .args(["s", &timeout, &timeout])
+                .status()
+            {
+                Ok(status) if status.success() => {
+                    tracing::debug!("Set screen saver timeout to {} seconds", self.screen_timeout_seconds);
+                }
+                Ok(_) => tracing::warn!("xset s command failed"),
+                Err(e) => tracing::warn!("Failed to run xset: {}", e),
+            }
+
+            // Make sure DPMS is enabled
+            match Command::new("xset").args(["+dpms"]).status() {
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Failed to enable DPMS: {}", e),
+            }
+        } else {
+            // Disable DPMS and screen saver
+            match Command::new("xset").args(["dpms", "0", "0", "0"]).status() {
+                Ok(status) if status.success() => {
+                    tracing::info!("Disabled DPMS timeout");
+                }
+                Ok(_) => tracing::warn!("xset dpms 0 command failed"),
+                Err(e) => tracing::warn!("Failed to run xset: {}", e),
+            }
+
+            match Command::new("xset").args(["s", "off"]).status() {
+                Ok(status) if status.success() => {
+                    tracing::debug!("Disabled screen saver");
+                }
+                Ok(_) => tracing::warn!("xset s off command failed"),
+                Err(e) => tracing::warn!("Failed to run xset: {}", e),
+            }
+
+            match Command::new("xset").args(["-dpms"]).status() {
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Failed to disable DPMS: {}", e),
+            }
+        }
+    }
+
     /// Restart picom to apply new configuration.
     /// Picom doesn't support config reload via signal, so we kill and restart it.
     fn reload_picom() {
@@ -415,6 +478,9 @@ impl Default for Config {
             bar_enabled: false,
             // Monitor order: empty = sort by X position
             monitor_order: Vec::new(),
+            // Screen timeout: enabled by default with 10 minute timeout
+            screen_timeout_enabled: true,
+            screen_timeout_seconds: 600,
             // Compositor settings (picom) - matching picom.conf defaults
             corner_radius: 12,
             blur_enabled: true,

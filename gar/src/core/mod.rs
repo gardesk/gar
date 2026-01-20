@@ -78,6 +78,9 @@ impl WindowManager {
             tracing::warn!("Failed to generate picom config: {}", e);
         }
 
+        // Apply screen timeout/DPMS settings
+        config.apply_screen_timeout();
+
         // Initialize IPC server (optional - graceful failure)
         let ipc_server = match IpcServer::new() {
             Ok(server) => Some(server),
