@@ -1,6 +1,18 @@
 use std::process::Command;
+use std::io::Write;
 
 use x11rb::connection::Connection as X11Connection;
+
+/// Debug logging to file (since RUST_LOG doesn't work with auto-started WM)
+fn debug_log(msg: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/gar-tiled-resize.log")
+    {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
 
 /// Reap any zombie child processes to prevent accumulation.
 /// Called periodically from the event loop.
@@ -316,6 +328,9 @@ impl WindowManager {
         // Grab Alt+Button1/Button3 on root for floating window move/resize
         self.conn.grab_mod_buttons()?;
 
+        // Grab Button1 on root (without mod) for edge resize in gaps between tiled windows
+        self.conn.grab_button1_on_root()?;
+
         self.conn.flush()?;
         tracing::info!("{} keybinds registered", state.keybinds.len());
         Ok(())
@@ -427,7 +442,15 @@ impl WindowManager {
             Event::DestroyNotify(e) => self.handle_destroy_notify(e)?,
             Event::ButtonPress(e) => self.handle_button_press(e)?,
             Event::ButtonRelease(e) => self.handle_button_release(e)?,
-            Event::MotionNotify(e) => self.handle_motion_notify(e)?,
+            Event::MotionNotify(e) => {
+                // Log first motion event to confirm events are arriving
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static FIRST_MOTION: AtomicBool = AtomicBool::new(true);
+                if FIRST_MOTION.swap(false, Ordering::Relaxed) {
+                    debug_log(&format!("FIRST_MOTION_EVENT: window={}", e.event));
+                }
+                self.handle_motion_notify(e)?
+            }
             Event::KeyPress(e) => self.handle_key_press(e)?,
             Event::EnterNotify(e) => {
                 self.handle_enter_notify(e)?;
@@ -680,6 +703,8 @@ impl WindowManager {
         let child = event.child;
         // Translate frame window to client window if needed
         let window = self.frames.client_for_frame(event_window).unwrap_or(event_window);
+        debug_log(&format!("BUTTON_PRESS_START: event_window={}, window={}, child={}, button={}, state={:?}",
+            event_window, window, child, event.detail, event.state));
         tracing::debug!("ButtonPress on window {} (event_window={}), child {}, button {}", window, event_window, child, event.detail);
 
         // If we're already in a drag, ignore additional button presses
@@ -771,12 +796,51 @@ impl WindowManager {
             }
         }
 
-        // Check for edge resize on TILED windows - use cursor state from motion detection
-        // If the cursor was changed to resize cursor, we know we're on a valid edge
+        // Check for edge resize on TILED windows - detect edge at click time
+        // This works even for apps like alacritty that don't propagate motion events
+        let is_managed_window = self.windows.contains_key(&window);
+        let is_managed_target = self.windows.contains_key(&target);
+        let is_window_float = is_managed_window && self.is_floating(window);
+        let is_target_float = is_managed_target && self.is_floating(target);
+        debug_log(&format!("TILED GATE: has_mod={}, button={}, window={}, target={}, is_managed_window={}, is_managed_target={}, is_window_float={}, is_target_float={}",
+            has_mod, event.detail, window, target, is_managed_window, is_managed_target, is_window_float, is_target_float));
+
+        // Use target (like tiled swap does) when window is root with child, otherwise window
+        let resize_window = if is_managed_target && !is_target_float {
+            target
+        } else if is_managed_window && !is_window_float {
+            window
+        } else {
+            // Neither is a valid tiled window, skip
+            0
+        };
+
         if !has_mod && event.detail == 1 {
-            if let Some((w1, w2, direction)) = self.tiled_edge_cursor {
-                let work_area = self.work_area();
-                let geometries = self.current_workspace().tree.calculate_geometries(work_area);
+            let work_area = self.work_area();
+            let geometries = self.current_workspace().tree.calculate_geometries(work_area);
+
+            debug_log(&format!("TILED EDGE CHECK: resize_window={}, pos=({},{}), num_geom={}",
+                resize_window, event.root_x, event.root_y, geometries.len()));
+
+            // Try to find edge resize - either from clicked window or from gap click
+            let edge_result = if resize_window != 0 {
+                // Clicked on a tiled window - check its edges
+                if let Some((_, my_rect)) = geometries.iter().find(|(w, _)| *w == resize_window) {
+                    let my_rect = *my_rect;
+                    debug_log(&format!("TILED EDGE CHECK: my_rect={:?}", my_rect));
+                    self.find_tiled_resize_edge(resize_window, &my_rect, event.root_x, event.root_y, &geometries)
+                } else {
+                    None
+                }
+            } else {
+                // Clicked on root/gap - find any adjacent windows near click position
+                debug_log(&format!("GAP CLICK: checking {} geometries for edge near ({},{})",
+                    geometries.len(), event.root_x, event.root_y));
+                self.find_edge_from_gap(event.root_x, event.root_y, &geometries)
+            };
+
+            if let Some((w1, w2, direction)) = edge_result {
+                debug_log(&format!("TILED EDGE FOUND: w1={}, w2={}, dir={:?}", w1, w2, direction));
 
                 // Calculate container size from both windows
                 let rect1 = geometries.iter().find(|(w, _)| *w == w1).map(|(_, r)| r);
@@ -804,6 +868,7 @@ impl WindowManager {
                     Direction::Up | Direction::Down => event.root_y,
                 };
 
+                debug_log(&format!("STARTING TILED RESIZE: w1={}, dir={:?}, ratio={}, container={}", w1, direction, start_ratio, container_size));
                 self.drag_state = Some(DragState::TiledResize {
                     direction,
                     start_pos,
@@ -818,6 +883,17 @@ impl WindowManager {
                     Direction::Up | Direction::Down => self.conn.cursor_v_double,
                 };
                 self.conn.grab_pointer(Some(cursor))?;
+                return Ok(());
+            }
+
+            // If we clicked on the gap (root) but didn't find an edge, replay the event
+            if resize_window == 0 {
+                debug_log("GAP CLICK: no edge found, replaying event");
+                self.conn.conn.allow_events(
+                    x11rb::protocol::xproto::Allow::REPLAY_POINTER,
+                    x11rb::CURRENT_TIME,
+                )?;
+                self.conn.flush()?;
                 return Ok(());
             }
         }
@@ -939,7 +1015,14 @@ impl WindowManager {
                     }
                 }
                 DragState::TiledResize { .. } => {
-                    // Layout already applied during motion, nothing special needed
+                    // Layout already applied during motion
+                    // Reset root cursor to default
+                    self.conn.set_root_cursor(self.conn.cursor_normal)?;
+                    // Allow any frozen pointer events to proceed
+                    self.conn.conn.allow_events(
+                        x11rb::protocol::xproto::Allow::ASYNC_POINTER,
+                        x11rb::CURRENT_TIME,
+                    )?;
                 }
             }
 
@@ -949,14 +1032,35 @@ impl WindowManager {
     }
 
     fn handle_motion_notify(&mut self, event: MotionNotifyEvent) -> Result<()> {
+        // Log first few motion events
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static HANDLER_COUNT: AtomicU32 = AtomicU32::new(0);
+        let count = HANDLER_COUNT.fetch_add(1, Ordering::Relaxed);
+        if count < 5 {
+            debug_log(&format!("MOTION_HANDLER: count={}, event_window={}, drag_state={}",
+                count, event.event, self.drag_state.is_some()));
+        }
+
         // If not in a drag, check for edge cursor changes
         if self.drag_state.is_none() {
             let event_window = event.event;
             // Translate frame window to client window if needed
             let window = self.frames.client_for_frame(event_window).unwrap_or(event_window);
 
-            if self.windows.contains_key(&window) {
-                if self.is_floating(window) {
+            let in_windows = self.windows.contains_key(&window);
+            let is_floating = in_windows && self.is_floating(window);
+
+            // Log occasionally (every ~100 events to avoid spam)
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static MOTION_COUNT: AtomicU32 = AtomicU32::new(0);
+            let mc = MOTION_COUNT.fetch_add(1, Ordering::Relaxed);
+            if mc % 100 == 0 {
+                debug_log(&format!("MOTION: event_win={}, client_win={}, in_windows={}, is_floating={}, pos=({},{})",
+                    event_window, window, in_windows, is_floating, event.root_x, event.root_y));
+            }
+
+            if in_windows {
+                if is_floating {
                     self.update_edge_cursor(window, event.root_x, event.root_y)?;
                 } else {
                     // Check for tiled edge hover (for cursor feedback)
@@ -1112,12 +1216,15 @@ impl WindowManager {
 
                 let new_ratio = (*start_ratio + ratio_delta).clamp(0.1, 0.9);
 
+                debug_log(&format!("TILED RESIZE MOTION: pixel_delta={}, new_ratio={}", pixel_delta, new_ratio));
+
                 // Update tree and apply layout
                 let window = *window;
                 let direction = *direction;
-                self.current_workspace_mut()
+                let changed = self.current_workspace_mut()
                     .tree
                     .set_split_ratio(window, direction, new_ratio);
+                debug_log(&format!("set_split_ratio returned: {}", changed));
                 self.apply_layout()?;
                 self.conn.flush()?;
             }
@@ -1185,6 +1292,15 @@ impl WindowManager {
         // Find the geometry of the window we're over
         let my_geometry = geometries.iter().find(|(w, _)| *w == window).map(|(_, r)| r);
 
+        // Log occasionally
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static EDGE_CHECK_COUNT: AtomicU32 = AtomicU32::new(0);
+        let ec = EDGE_CHECK_COUNT.fetch_add(1, Ordering::Relaxed);
+        if ec % 100 == 0 {
+            debug_log(&format!("EDGE_CHECK: window={}, my_geom={:?}, num_geometries={}, pos=({},{})",
+                window, my_geometry, geometries.len(), root_x, root_y));
+        }
+
         let new_state = if let Some(my_rect) = my_geometry {
             // Check if we're near an edge of this window that has an adjacent window
             self.find_tiled_resize_edge(window, my_rect, root_x, root_y, &geometries)
@@ -1213,6 +1329,7 @@ impl WindowManager {
         }
 
         if let Some((w1, w2, dir)) = new_state {
+            debug_log(&format!("EDGE DETECTED: w1={}, w2={}, dir={:?}", w1, w2, dir));
             // Set resize cursor on both windows sharing the edge (and their frames)
             let cursor = match dir {
                 Direction::Left | Direction::Right => self.conn.cursor_h_double,
@@ -1242,7 +1359,7 @@ impl WindowManager {
         y: i16,
         geometries: &[(u32, Rect)],
     ) -> Option<(u32, u32, Direction)> {
-        const EDGE_ZONE: i16 = 16; // Detection zone from window edge
+        const EDGE_ZONE: i16 = 32; // Detection zone from window edge (increased for easier grabbing)
         let gap = self.config.gap_inner as i16;
 
         let left = rect.x;
@@ -1250,11 +1367,23 @@ impl WindowManager {
         let top = rect.y;
         let bottom = rect.y + rect.height as i16;
 
+        // Calculate distances from each edge
+        let dist_from_left = x - left;
+        let dist_from_right = right - x;
+        let dist_from_top = y - top;
+        let dist_from_bottom = bottom - y;
+
+        debug_log(&format!("EDGE DIST: x={}, y={}, left={}, right={}, top={}, bottom={}", x, y, left, right, top, bottom));
+        debug_log(&format!("EDGE DIST: from_left={}, from_right={}, from_top={}, from_bottom={}, zone={}",
+            dist_from_left, dist_from_right, dist_from_top, dist_from_bottom, EDGE_ZONE));
+
         // Check each edge
         let near_left = x >= left && x < left + EDGE_ZONE;
         let near_right = x > right - EDGE_ZONE && x <= right;
         let near_top = y >= top && y < top + EDGE_ZONE;
         let near_bottom = y > bottom - EDGE_ZONE && y <= bottom;
+
+        debug_log(&format!("NEAR EDGES: left={}, right={}, top={}, bottom={}", near_left, near_right, near_top, near_bottom));
 
         // For each edge we're near, look for an adjacent window
         if near_left {
@@ -1322,6 +1451,70 @@ impl WindowManager {
                     let x_overlap = x >= other_r.x.max(left) && x < (other_r.x + other_r.width as i16).min(right);
                     if x_overlap {
                         return Some((window, *other_w, Direction::Down));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Find a resize edge when clicking in the gap between tiled windows.
+    /// Returns (left/top_window, right/bottom_window, direction) if click is in a gap.
+    fn find_edge_from_gap(
+        &self,
+        x: i16,
+        y: i16,
+        geometries: &[(u32, Rect)],
+    ) -> Option<(u32, u32, Direction)> {
+        let gap = self.config.gap_inner as i16;
+        let tolerance = gap + 8; // Gap width plus some tolerance
+
+        // Check all pairs of windows for horizontal adjacency (vertical split line)
+        for (w1, r1) in geometries {
+            let r1_right = r1.x + r1.width as i16;
+            for (w2, r2) in geometries {
+                if w1 == w2 {
+                    continue;
+                }
+                // Check if w2 is to the right of w1 (within gap distance)
+                let horizontal_gap = r2.x - r1_right;
+                if horizontal_gap >= 0 && horizontal_gap <= tolerance {
+                    // Check if click is in the gap horizontally
+                    if x >= r1_right && x <= r2.x {
+                        // Check vertical overlap at click position
+                        let v_overlap_top = r1.y.max(r2.y);
+                        let v_overlap_bottom = (r1.y + r1.height as i16).min(r2.y + r2.height as i16);
+                        if y >= v_overlap_top && y < v_overlap_bottom {
+                            debug_log(&format!("GAP EDGE FOUND H: w1={}, w2={}, gap_x=[{},{}], y_range=[{},{}]",
+                                w1, w2, r1_right, r2.x, v_overlap_top, v_overlap_bottom));
+                            return Some((*w1, *w2, Direction::Right));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check all pairs of windows for vertical adjacency (horizontal split line)
+        for (w1, r1) in geometries {
+            let r1_bottom = r1.y + r1.height as i16;
+            for (w2, r2) in geometries {
+                if w1 == w2 {
+                    continue;
+                }
+                // Check if w2 is below w1 (within gap distance)
+                let vertical_gap = r2.y - r1_bottom;
+                if vertical_gap >= 0 && vertical_gap <= tolerance {
+                    // Check if click is in the gap vertically
+                    if y >= r1_bottom && y <= r2.y {
+                        // Check horizontal overlap at click position
+                        let h_overlap_left = r1.x.max(r2.x);
+                        let h_overlap_right = (r1.x + r1.width as i16).min(r2.x + r2.width as i16);
+                        if x >= h_overlap_left && x < h_overlap_right {
+                            debug_log(&format!("GAP EDGE FOUND V: w1={}, w2={}, gap_y=[{},{}], x_range=[{},{}]",
+                                w1, w2, r1_bottom, r2.y, h_overlap_left, h_overlap_right));
+                            return Some((*w1, *w2, Direction::Down));
+                        }
                     }
                 }
             }

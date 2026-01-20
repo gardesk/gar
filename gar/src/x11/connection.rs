@@ -450,6 +450,34 @@ impl Connection {
         Ok(())
     }
 
+    /// Grab Button1 on root without modifiers to catch clicks in gaps between tiled windows.
+    pub fn grab_button1_on_root(&self) -> Result<(), Error> {
+        let numlock = ModMask::M2;
+        let capslock = ModMask::LOCK;
+
+        // Grab Button1 without mod key (but handle numlock/capslock variants)
+        for mods in [
+            ModMask::from(0u16),
+            numlock,
+            capslock,
+            numlock | capslock,
+        ] {
+            self.conn.grab_button(
+                false,
+                self.root,
+                EventMask::BUTTON_PRESS,
+                GrabMode::SYNC, // Sync mode so we can replay to client if needed
+                GrabMode::ASYNC,
+                x11rb::NONE,
+                x11rb::NONE,
+                ButtonIndex::M1,
+                mods,
+            )?;
+        }
+        tracing::debug!("Grabbed Button1 on root for gap edge resize");
+        Ok(())
+    }
+
     /// Set the cursor for a window.
     pub fn set_window_cursor(&self, window: Window, cursor: u32) -> Result<(), Error> {
         tracing::debug!("set_window_cursor: window={} cursor={}", window, cursor);
@@ -463,6 +491,14 @@ impl Connection {
         tracing::debug!("clear_window_cursor: window={}", window);
         let change = ChangeWindowAttributesAux::new().cursor(x11rb::NONE);
         self.conn.change_window_attributes(window, &change)?;
+        Ok(())
+    }
+
+    /// Set the cursor on the root window.
+    pub fn set_root_cursor(&self, cursor: u32) -> Result<(), Error> {
+        tracing::debug!("set_root_cursor: cursor={}", cursor);
+        let change = ChangeWindowAttributesAux::new().cursor(cursor);
+        self.conn.change_window_attributes(self.root, &change)?;
         Ok(())
     }
 
