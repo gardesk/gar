@@ -1700,18 +1700,30 @@ impl WindowManager {
     }
 
     fn focus_direction(&mut self, direction: Direction) -> Result<()> {
+        tracing::debug!(
+            "focus_direction({:?}): focused_monitor={}, monitors={:?}",
+            direction,
+            self.focused_monitor,
+            self.monitors.iter().map(|m| (&m.name, m.geometry.x)).collect::<Vec<_>>()
+        );
+
         let Some(focused) = self.focused_window else {
             // No focused window - try to focus adjacent monitor
+            tracing::debug!("No focused window, trying adjacent monitor");
             return self.focus_adjacent_monitor(direction);
         };
 
         let screen = self.screen_rect();
         let geometries = self.current_workspace().tree.calculate_geometries(screen);
+        tracing::debug!("Window geometries on workspace: {:?}", geometries);
 
         // Look up remembered window for this direction (window memory)
         let preferred = self.directional_focus_memory.get(&(focused, direction)).copied();
 
-        if let Some(target) = Node::find_adjacent(&geometries, focused, direction, preferred) {
+        let adjacent = Node::find_adjacent(&geometries, focused, direction, preferred);
+        tracing::debug!("find_adjacent result: {:?}", adjacent);
+
+        if let Some(target) = adjacent {
             // Check if memory was used (preferred matched target) or default algorithm was used
             let used_memory = preferred == Some(target);
 
@@ -1763,6 +1775,7 @@ impl WindowManager {
             tracing::debug!("Focused {:?} to window {} (preferred: {:?})", direction, target, preferred);
         } else {
             // No adjacent window on this workspace - try adjacent monitor
+            tracing::debug!("No adjacent window found, trying adjacent monitor");
             self.focus_adjacent_monitor(direction)?;
         }
 
@@ -1771,7 +1784,13 @@ impl WindowManager {
 
     /// Focus the adjacent monitor in the given direction (does NOT wrap at edges)
     fn focus_adjacent_monitor(&mut self, direction: Direction) -> Result<()> {
+        tracing::debug!(
+            "focus_adjacent_monitor({:?}): focused_monitor={}, num_monitors={}",
+            direction, self.focused_monitor, self.monitors.len()
+        );
+
         if self.monitors.len() <= 1 {
+            tracing::debug!("Only one monitor, nothing to do");
             return Ok(());
         }
 
@@ -1780,6 +1799,7 @@ impl WindowManager {
             Direction::Left => {
                 if self.focused_monitor == 0 {
                     // At leftmost monitor - do nothing
+                    tracing::debug!("Already at leftmost monitor (index 0), not navigating left");
                     return Ok(());
                 }
                 self.focused_monitor - 1
@@ -1787,12 +1807,16 @@ impl WindowManager {
             Direction::Right => {
                 if self.focused_monitor >= self.monitors.len() - 1 {
                     // At rightmost monitor - do nothing
+                    tracing::debug!("Already at rightmost monitor, not navigating right");
                     return Ok(());
                 }
                 self.focused_monitor + 1
             }
             // Up/Down could navigate if monitors are stacked vertically
-            Direction::Up | Direction::Down => return Ok(()),
+            Direction::Up | Direction::Down => {
+                tracing::debug!("Up/Down navigation not supported for horizontal monitor layout");
+                return Ok(());
+            }
         };
 
         tracing::info!("Moving focus from monitor {} to {}", self.focused_monitor, target_idx);
