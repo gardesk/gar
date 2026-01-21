@@ -950,6 +950,12 @@ impl WindowManager {
 
         // Only handle if we manage this window
         if !self.windows.contains_key(&window) {
+            // Replay the click so it passes through to the unmanaged window
+            self.conn.conn.allow_events(
+                x11rb::protocol::xproto::Allow::REPLAY_POINTER,
+                x11rb::CURRENT_TIME,
+            )?;
+            self.conn.flush()?;
             return Ok(());
         }
 
