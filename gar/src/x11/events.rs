@@ -676,25 +676,33 @@ impl WindowManager {
             tracing::info!("Dock window {} destroyed, removing strut", event.window);
         }
 
+        // Check if this window was actually managed before doing layout/focus work
+        let was_managed = self.windows.contains_key(&event.window);
+
         // Remove from management
         self.unmanage_window(event.window);
 
-        // Clear the entire root window to remove any leftover pixels
-        // This is needed because X11 without a compositor doesn't automatically repaint
-        self.conn.clear_root_area(0, 0, self.conn.screen_width, self.conn.screen_height)?;
+        // Only do layout/focus work if the window was actually managed
+        // Unmanaged windows (like popup menus, tooltips) shouldn't trigger pointer warps
+        if was_managed {
+            // Clear the entire root window to remove any leftover pixels
+            // This is needed because X11 without a compositor doesn't automatically repaint
+            self.conn.clear_root_area(0, 0, self.conn.screen_width, self.conn.screen_height)?;
 
-        // Re-apply layout
-        self.apply_layout()?;
+            // Re-apply layout
+            self.apply_layout()?;
 
-        // Focus next window or warp to monitor if none left
-        if let Some(window) = self.focused_window {
-            self.set_focus(window, true)?;
-        } else {
-            // No windows left, warp to current monitor center
-            self.warp_to_monitor(self.focused_monitor)?;
+            // Focus next window or warp to monitor if none left
+            if let Some(window) = self.focused_window {
+                self.set_focus(window, true)?;
+            } else {
+                // No windows left, warp to current monitor center
+                self.warp_to_monitor(self.focused_monitor)?;
+            }
+
+            self.conn.flush()?;
         }
 
-        self.conn.flush()?;
         Ok(())
     }
 
