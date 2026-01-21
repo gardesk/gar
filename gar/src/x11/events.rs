@@ -683,7 +683,7 @@ impl WindowManager {
         self.unmanage_window(event.window);
 
         // Only do layout/focus work if the window was actually managed
-        // Unmanaged windows (like popup menus, tooltips) shouldn't trigger pointer warps
+        // Unmanaged windows (like popup menus, tooltips) shouldn't trigger layout recalc or pointer warps
         if was_managed {
             // Clear the entire root window to remove any leftover pixels
             // This is needed because X11 without a compositor doesn't automatically repaint
@@ -699,10 +699,10 @@ impl WindowManager {
                 // No windows left, warp to current monitor center
                 self.warp_to_monitor(self.focused_monitor)?;
             }
-
-            self.conn.flush()?;
         }
 
+        // Always flush to ensure any pointer ungrab or other operations are sent
+        self.conn.flush()?;
         Ok(())
     }
 
