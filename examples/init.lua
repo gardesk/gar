@@ -12,6 +12,12 @@ gar.exec_once("garlock daemon")
 -- Clipboard manager daemon
 gar.exec_once("garclip daemon --foreground")
 
+-- System tray with quick settings panel
+gar.exec_once("gartray daemon")
+
+-- Polkit authentication agent (needed for power actions via D-Bus)
+gar.exec_once("/usr/libexec/kf6/polkit-kde-authentication-agent-1")
+
 -- Uncomment the ones you want:
 -- gar.exec_once("picom")                      -- Compositor (for transparency/shadows)
 -- gar.exec_once("dunst")                      -- Notification daemon
@@ -102,7 +108,7 @@ gar.bar = {
     -- Module layout
     modules_left = { "workspaces", "window_title" },
     modules_center = {},
-    modules_right = { "almanta", "filesystem", "memory", "cpu", "battery", "wlan", "volume", "datetime" },
+    modules_right = { "almanta", "filesystem", "memory", "cpu", "battery", "wlan", "volume", "tray", "datetime", "quick_settings" },
 
     -- Module configurations
     modules = {
@@ -218,10 +224,100 @@ gar.set("follow_window_on_move", true)  -- Follow window when using Mod+Shift+nu
 -- Use "mod" for real X session, "alt" for nested testing (Xephyr)
 local mod = "mod"
 
--- Terminal
+-- Terminal (fallback)
 gar.bind(mod .. "+Return", function()
     gar.exec("alacritty || kitty || foot || xterm")
 end)
+
+-- garterm with fish shell
+gar.bind(mod .. "+shift+Return", function()
+    gar.exec("garterm")
+end)
+
+-- CPR-Music dev workspace via session
+gar.bind(mod .. "+alt+Return", function()
+    gar.exec("garterm")
+    gar.exec("sleep 0.3 && gartermctl load-session cpr-music")
+end)
+
+--------------------------------------------------------------------------------
+-- GARTERM CONFIGURATION
+--------------------------------------------------------------------------------
+-- garterm reads this table for shell, font, colors, sessions, and keybinds
+
+gar.terminal = {
+    -- Default shell
+    shell = "/usr/bin/fish",
+
+    -- Font settings
+    font = {
+        family = "JetBrainsMono Nerd Font",
+        size = 20.0,
+    },
+
+    -- Color scheme
+    colors = {
+        preset = "catpuccin-mocha",
+    },
+
+    -- Tab bar configuration
+    tab_bar = {
+        height = 24,                          -- Tab bar height in pixels
+        position = "top",                     -- "top" or "bottom"
+        show_single_tab = false,              -- Show tab bar even with one tab
+        max_tab_width = 200,                  -- Maximum width per tab in pixels
+        tab_padding = 16,                     -- Horizontal padding inside each tab
+        shorten_paths = true,                 -- Shorten paths: ~/P/a/src style
+
+        -- Colors as {R, G, B, A} with values 0.0 to 1.0
+        background = {0.08, 0.08, 0.12, 1.0}, -- Tab bar background
+        active_bg = {0.15, 0.15, 0.20, 1.0},  -- Active tab background
+        inactive_bg = {0.10, 0.10, 0.14, 1.0},-- Inactive tab background
+        active_fg = {1.0, 1.0, 1.0, 1.0},     -- Active tab text color
+        inactive_fg = {0.7, 0.7, 0.7, 1.0},   -- Inactive tab text color
+    },
+
+    -- Session definitions (load with gartermctl load-session <name>)
+    sessions = {
+        -- CPR-Music development workspace
+        ["cpr-music"] = {
+            tabs = {
+                {
+                    title = "Frontend",
+                    cwd = "~/GithubOrgs/espadonne/CPR-Music",
+                    cmd = "npm run dev",
+                },
+                {
+                    title = "Backend",
+                    cwd = "~/GithubOrgs/mfwolffe/CPR-Music-Backend",
+                    cmd = "source .venv/bin/activate.fish && python manage.py runserver",
+                },
+                {
+                    title = "Editor",
+                    cwd = "~/GithubOrgs/espadonne/CPR-Music",
+                    cmd = "fackr",
+                },
+            },
+        },
+    },
+
+    -- Keybinds within garterm (Lua function callbacks)
+    keybinds = {
+        -- Quick session loading
+        ["alt+m"] = { action = "load_session", session = "cpr-music"},
+
+        -- Open fackr in current pane
+        ["alt+e"] = function()
+            gar.terminal.send_text(nil, "fackr \n")
+        end,
+
+        -- Open fackr in new tab
+        ["alt+shift+e"] = function()
+            gar.terminal.new_tab({})
+            gar.terminal.send_text(nil, "fackr \n")
+        end,
+    },
+}
 
 -- Close window
 gar.bind(mod .. "+q", gar.close_window)
