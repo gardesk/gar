@@ -1373,31 +1373,21 @@ impl WindowManager {
         y: i16,
         geometries: &[(u32, Rect)],
     ) -> Option<(u32, u32, Direction)> {
-        const EDGE_ZONE: i16 = 32; // Detection zone from window edge (increased for easier grabbing)
+        // Edge zone for resize detection - wide enough to cover gap + some margin
+        // This makes it easy to grab edges: click near the boundary between windows
         let gap = self.config.gap_inner as i16;
+        let edge_zone = gap + 8; // Gap width plus comfortable margin
 
         let left = rect.x;
         let right = rect.x + rect.width as i16;
         let top = rect.y;
         let bottom = rect.y + rect.height as i16;
 
-        // Calculate distances from each edge
-        let dist_from_left = x - left;
-        let dist_from_right = right - x;
-        let dist_from_top = y - top;
-        let dist_from_bottom = bottom - y;
-
-        debug_log(&format!("EDGE DIST: x={}, y={}, left={}, right={}, top={}, bottom={}", x, y, left, right, top, bottom));
-        debug_log(&format!("EDGE DIST: from_left={}, from_right={}, from_top={}, from_bottom={}, zone={}",
-            dist_from_left, dist_from_right, dist_from_top, dist_from_bottom, EDGE_ZONE));
-
-        // Check each edge
-        let near_left = x >= left && x < left + EDGE_ZONE;
-        let near_right = x > right - EDGE_ZONE && x <= right;
-        let near_top = y >= top && y < top + EDGE_ZONE;
-        let near_bottom = y > bottom - EDGE_ZONE && y <= bottom;
-
-        debug_log(&format!("NEAR EDGES: left={}, right={}, top={}, bottom={}", near_left, near_right, near_top, near_bottom));
+        // Check each edge - trigger if within edge_zone of the window boundary
+        let near_left = x >= left && x < left + edge_zone;
+        let near_right = x > right - edge_zone && x <= right;
+        let near_top = y >= top && y < top + edge_zone;
+        let near_bottom = y > bottom - edge_zone && y <= bottom;
 
         // For each edge we're near, look for an adjacent window
         if near_left {
@@ -1482,7 +1472,12 @@ impl WindowManager {
         geometries: &[(u32, Rect)],
     ) -> Option<(u32, u32, Direction)> {
         let gap = self.config.gap_inner as i16;
-        let tolerance = gap + 8; // Gap width plus some tolerance
+
+        // Log all geometries for debugging
+        for (w, r) in geometries {
+            debug_log(&format!("GAP CHECK GEOM: w={}, x={}, y={}, w={}, h={}, right={}, bottom={}",
+                w, r.x, r.y, r.width, r.height, r.x + r.width as i16, r.y + r.height as i16));
+        }
 
         // Check all pairs of windows for horizontal adjacency (vertical split line)
         for (w1, r1) in geometries {
@@ -1491,14 +1486,22 @@ impl WindowManager {
                 if w1 == w2 {
                     continue;
                 }
-                // Check if w2 is to the right of w1 (within gap distance)
+                // Check if w2 is to the right of w1
                 let horizontal_gap = r2.x - r1_right;
-                if horizontal_gap >= 0 && horizontal_gap <= tolerance {
-                    // Check if click is in the gap horizontally
-                    if x >= r1_right && x <= r2.x {
+                debug_log(&format!("GAP H CHECK: w1={} right={}, w2={} left={}, gap={}, click_x={}",
+                    w1, r1_right, w2, r2.x, horizontal_gap, x));
+
+                // Allow detection if click is anywhere near the gap area
+                // Gap region is from r1_right to r2.x, but expand by a few pixels for tolerance
+                let gap_left = r1_right - 4;
+                let gap_right = r2.x + 4;
+
+                if horizontal_gap >= 0 && horizontal_gap <= gap + 16 {
+                    if x >= gap_left && x <= gap_right {
                         // Check vertical overlap at click position
                         let v_overlap_top = r1.y.max(r2.y);
                         let v_overlap_bottom = (r1.y + r1.height as i16).min(r2.y + r2.height as i16);
+                        debug_log(&format!("GAP H Y CHECK: y={}, v_top={}, v_bottom={}", y, v_overlap_top, v_overlap_bottom));
                         if y >= v_overlap_top && y < v_overlap_bottom {
                             debug_log(&format!("GAP EDGE FOUND H: w1={}, w2={}, gap_x=[{},{}], y_range=[{},{}]",
                                 w1, w2, r1_right, r2.x, v_overlap_top, v_overlap_bottom));
@@ -1516,11 +1519,15 @@ impl WindowManager {
                 if w1 == w2 {
                     continue;
                 }
-                // Check if w2 is below w1 (within gap distance)
+                // Check if w2 is below w1
                 let vertical_gap = r2.y - r1_bottom;
-                if vertical_gap >= 0 && vertical_gap <= tolerance {
-                    // Check if click is in the gap vertically
-                    if y >= r1_bottom && y <= r2.y {
+
+                // Allow detection if click is anywhere near the gap area
+                let gap_top = r1_bottom - 4;
+                let gap_bottom = r2.y + 4;
+
+                if vertical_gap >= 0 && vertical_gap <= gap + 16 {
+                    if y >= gap_top && y <= gap_bottom {
                         // Check horizontal overlap at click position
                         let h_overlap_left = r1.x.max(r2.x);
                         let h_overlap_right = (r1.x + r1.width as i16).min(r2.x + r2.width as i16);
