@@ -7,6 +7,8 @@ pub struct Window {
     pub id: XWindow,
     /// Geometry for floating mode (position and size when floating)
     pub floating_geometry: Rect,
+    /// Current actual geometry (updated by apply_layout, used for pointer warping)
+    pub current_geometry: Rect,
     pub mapped: bool,
     pub focused: bool,
     pub floating: bool,
@@ -30,6 +32,7 @@ impl Window {
         Self {
             id,
             floating_geometry: Rect::new(0, 0, 640, 480),
+            current_geometry: Rect::new(0, 0, 640, 480),
             mapped: false,
             focused: false,
             floating: false,

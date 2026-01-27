@@ -700,11 +700,22 @@ impl WindowManager {
 
         // Warp pointer to center of focused window (mouse follows focus)
         if warp_pointer {
-            if let Err(e) = self.conn.warp_pointer_to_window(window) {
-                tracing::warn!("Failed to warp pointer: {}", e);
+            // Use stored geometry instead of querying X11 (avoids race with ConfigureWindow)
+            if let Some(win) = self.windows.get(&window) {
+                let g = &win.current_geometry;
+                let center_x = g.x + (g.width as i16 / 2);
+                let center_y = g.y + (g.height as i16 / 2);
+                if let Err(e) = self.conn.warp_pointer(center_x, center_y) {
+                    tracing::warn!("Failed to warp pointer: {}", e);
+                }
+            } else {
+                // Fallback to querying X11 if window not in our map
+                if let Err(e) = self.conn.warp_pointer_to_window(window) {
+                    tracing::warn!("Failed to warp pointer: {}", e);
+                }
             }
-            // Record warp time to suppress EnterNotify feedback loop
             self.last_warp = std::time::Instant::now();
+            self.conn.flush()?;
         }
 
         Ok(())
@@ -981,6 +992,11 @@ impl WindowManager {
                         border_width,
                     )?;
                 }
+
+                // Store the actual geometry for pointer warping
+                if let Some(win) = self.windows.get_mut(window) {
+                    win.current_geometry = Rect::new(gapped_x, gapped_y, final_width.max(1), final_height.max(1));
+                }
             }
 
             // 2. Configure floating windows and stack them above tiled
@@ -988,59 +1004,65 @@ impl WindowManager {
 
             for window_id in floating_ids {
                 // Get the window's floating geometry from our state
-                if let Some(win) = self.windows.get(&window_id) {
-                    let geom = win.floating_geometry;
-                    let adjusted_width = geom.width.saturating_sub(2 * border_width as u16);
-                    let adjusted_height = geom.height.saturating_sub(2 * border_width as u16);
-
-                    let has_frame = win.frame.is_some();
-
-                    if has_frame && titlebar_enabled {
-                        // Configure frame for floating window
-                        let client_height = adjusted_height.saturating_sub(titlebar_height);
-                        self.frames.configure_frame(
-                            &self.conn.conn,
-                            window_id,
-                            geom.x,
-                            geom.y,
-                            adjusted_width.max(1),
-                            client_height.max(1),
-                            titlebar_height,
-                            border_width as u16,
-                        )?;
-
-                        // Raise frame to top of stack
-                        if let Some(frame) = self.frames.frame_for_client(window_id) {
-                            let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
-                            self.conn.conn.configure_window(frame, &aux)?;
-                        }
-
-                        tracing::debug!(
-                            "apply_layout: FLOATING+FRAME window={} at ({}, {}) size {}x{} (raising)",
-                            window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
-                        );
-                    } else {
-                        tracing::debug!(
-                            "apply_layout: FLOATING window={} at ({}, {}) size {}x{} (raising)",
-                            window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
-                        );
-
-                        // Configure geometry
-                        self.conn.configure_window(
-                            window_id,
-                            geom.x,
-                            geom.y,
-                            adjusted_width.max(1),
-                            adjusted_height.max(1),
-                            border_width,
-                        )?;
-
-                        // Raise to top of stack (each subsequent window goes above the previous)
-                        let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
-                        self.conn.conn.configure_window(window_id, &aux)?;
+                let (geom, has_frame) = match self.windows.get(&window_id) {
+                    Some(win) => (win.floating_geometry, win.frame.is_some()),
+                    None => {
+                        tracing::warn!("apply_layout: floating window {} not in windows map!", window_id);
+                        continue;
                     }
+                };
+
+                let adjusted_width = geom.width.saturating_sub(2 * border_width as u16);
+                let adjusted_height = geom.height.saturating_sub(2 * border_width as u16);
+
+                if has_frame && titlebar_enabled {
+                    // Configure frame for floating window
+                    let client_height = adjusted_height.saturating_sub(titlebar_height);
+                    self.frames.configure_frame(
+                        &self.conn.conn,
+                        window_id,
+                        geom.x,
+                        geom.y,
+                        adjusted_width.max(1),
+                        client_height.max(1),
+                        titlebar_height,
+                        border_width as u16,
+                    )?;
+
+                    // Raise frame to top of stack
+                    if let Some(frame) = self.frames.frame_for_client(window_id) {
+                        let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+                        self.conn.conn.configure_window(frame, &aux)?;
+                    }
+
+                    tracing::debug!(
+                        "apply_layout: FLOATING+FRAME window={} at ({}, {}) size {}x{} (raising)",
+                        window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
+                    );
                 } else {
-                    tracing::warn!("apply_layout: floating window {} not in windows map!", window_id);
+                    tracing::debug!(
+                        "apply_layout: FLOATING window={} at ({}, {}) size {}x{} (raising)",
+                        window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
+                    );
+
+                    // Configure geometry
+                    self.conn.configure_window(
+                        window_id,
+                        geom.x,
+                        geom.y,
+                        adjusted_width.max(1),
+                        adjusted_height.max(1),
+                        border_width,
+                    )?;
+
+                    // Raise to top of stack (each subsequent window goes above the previous)
+                    let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+                    self.conn.conn.configure_window(window_id, &aux)?;
+                }
+
+                // Store the actual geometry for pointer warping
+                if let Some(win) = self.windows.get_mut(&window_id) {
+                    win.current_geometry = Rect::new(geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1));
                 }
             }
         }

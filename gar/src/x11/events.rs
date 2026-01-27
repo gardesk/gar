@@ -571,6 +571,8 @@ impl WindowManager {
 
         // Apply layout to all windows
         self.apply_layout()?;
+        // Flush to ensure ConfigureWindow requests are processed before we query geometry
+        self.conn.flush()?;
 
         // Focus the new window if on a visible workspace
         if target_visible {

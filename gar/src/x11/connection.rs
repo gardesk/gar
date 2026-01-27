@@ -516,6 +516,11 @@ impl Connection {
         let center_x = (geom.width / 2) as i16;
         let center_y = (geom.height / 2) as i16;
 
+        tracing::debug!(
+            "Warping pointer to window {}: geom={}x{}+{}+{}, center=({},{})",
+            window, geom.width, geom.height, geom.x, geom.y, center_x, center_y
+        );
+
         self.conn.warp_pointer(
             x11rb::NONE,  // src_window (none = don't check source)
             window,       // dst_window
