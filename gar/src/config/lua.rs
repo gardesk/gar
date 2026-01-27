@@ -140,11 +140,15 @@ impl LuaConfig {
         // Check if gar.bar table exists - enables garbar integration
         self.check_bar_config()?;
 
+        // Check if gar.notification table exists - enables garnotify integration
+        self.check_notification_config()?;
+
         let state = self.state.lock().unwrap();
         tracing::info!(
-            "Config loaded: {} keybinds registered, bar_enabled={}",
+            "Config loaded: {} keybinds registered, bar_enabled={}, notification_enabled={}",
             state.keybinds.len(),
-            state.config.bar_enabled
+            state.config.bar_enabled,
+            state.config.notification_enabled
         );
 
         Ok(())
@@ -173,6 +177,28 @@ impl LuaConfig {
             Err(_) => {
                 // gar.bar not set, garbar won't be spawned
                 tracing::debug!("gar.bar not configured, garbar integration disabled");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if gar.notification table is configured, enabling garnotify integration
+    fn check_notification_config(&self) -> LuaResult<()> {
+        let globals = self.lua.globals();
+        let gar: Table = globals.get("gar")?;
+
+        // Check if gar.notification exists and is a table
+        match gar.get::<Table>("notification") {
+            Ok(_) => {
+                // gar.notification exists! Enable garnotify integration
+                let mut state = self.state.lock().unwrap();
+                state.config.notification_enabled = true;
+                tracing::info!("garnotify integration enabled");
+            }
+            Err(_) => {
+                // gar.notification not set, garnotify won't be auto-spawned
+                tracing::debug!("gar.notification not configured, garnotify integration disabled");
             }
         }
 
