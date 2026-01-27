@@ -1943,43 +1943,50 @@ impl WindowManager {
             // Check if memory was used (preferred matched target) or default algorithm was used
             let used_memory = preferred == Some(target);
 
+            tracing::info!("NAV: {:?} from {} to {}, preferred={:?}, used_memory={}",
+                direction, focused, target, preferred, used_memory);
+
             // Store the directional focus memory for next time
             self.directional_focus_memory.insert((focused, direction), target);
+            tracing::info!("NAV: stored ({}, {:?}) -> {}", focused, direction, target);
 
-            // Store reverse direction only if:
-            // 1. Default algorithm was used (not memory-assisted jump that skipped windows)
-            // 2. Windows are aligned (same row/column)
-            if !used_memory {
-                if let (Some((_, from_rect)), Some((_, to_rect))) = (
-                    geometries.iter().find(|(w, _)| *w == focused),
-                    geometries.iter().find(|(w, _)| *w == target),
-                ) {
-                    let dominated = match direction {
-                        // For Left/Right: store reverse if windows share vertical space (same row)
-                        Direction::Left | Direction::Right => {
-                            let overlap_start = from_rect.y.max(to_rect.y);
-                            let overlap_end = (from_rect.y + from_rect.height as i16)
-                                .min(to_rect.y + to_rect.height as i16);
-                            overlap_start < overlap_end
-                        }
-                        // For Up/Down: store reverse if windows share horizontal space (same column)
-                        Direction::Up | Direction::Down => {
-                            let overlap_start = from_rect.x.max(to_rect.x);
-                            let overlap_end = (from_rect.x + from_rect.width as i16)
-                                .min(to_rect.x + to_rect.width as i16);
-                            overlap_start < overlap_end
-                        }
-                    };
-
-                    if dominated {
-                        let opposite = match direction {
-                            Direction::Left => Direction::Right,
-                            Direction::Right => Direction::Left,
-                            Direction::Up => Direction::Down,
-                            Direction::Down => Direction::Up,
-                        };
-                        self.directional_focus_memory.insert((target, opposite), focused);
+            // Always store reverse direction if windows are aligned (same row/column)
+            // This ensures "go back" always returns to the window we came from
+            if let (Some((_, from_rect)), Some((_, to_rect))) = (
+                geometries.iter().find(|(w, _)| *w == focused),
+                geometries.iter().find(|(w, _)| *w == target),
+            ) {
+                let overlaps = match direction {
+                    // For Left/Right: store reverse if windows share vertical space (same row)
+                    Direction::Left | Direction::Right => {
+                        let overlap_start = from_rect.y.max(to_rect.y);
+                        let overlap_end = (from_rect.y + from_rect.height as i16)
+                            .min(to_rect.y + to_rect.height as i16);
+                        tracing::info!("NAV: L/R overlap check: from_y={},{} to_y={},{} overlap=[{},{}]",
+                            from_rect.y, from_rect.height, to_rect.y, to_rect.height, overlap_start, overlap_end);
+                        overlap_start < overlap_end
                     }
+                    // For Up/Down: store reverse if windows share horizontal space (same column)
+                    Direction::Up | Direction::Down => {
+                        let overlap_start = from_rect.x.max(to_rect.x);
+                        let overlap_end = (from_rect.x + from_rect.width as i16)
+                            .min(to_rect.x + to_rect.width as i16);
+                        tracing::info!("NAV: U/D overlap check: from_x={},{} to_x={},{} overlap=[{},{}]",
+                            from_rect.x, from_rect.width, to_rect.x, to_rect.width, overlap_start, overlap_end);
+                        overlap_start < overlap_end
+                    }
+                };
+
+                tracing::info!("NAV: overlaps={}", overlaps);
+                if overlaps {
+                    let opposite = match direction {
+                        Direction::Left => Direction::Right,
+                        Direction::Right => Direction::Left,
+                        Direction::Up => Direction::Down,
+                        Direction::Down => Direction::Up,
+                    };
+                    self.directional_focus_memory.insert((target, opposite), focused);
+                    tracing::info!("NAV: stored reverse ({}, {:?}) -> {}", target, opposite, focused);
                 }
             }
 
@@ -2541,6 +2548,11 @@ impl WindowManager {
         // Sync to ensure X server processes all unmap requests before we exit
         let _ = self.conn.sync();
         tracing::info!("Windows unmapped and synced");
+
+        // Kill all processes spawned via gar.exec()/gar.exec_once()
+        if let Ok(state) = self.lua_state.lock() {
+            state.kill_spawned_children();
+        }
 
         // Stop garbar if it was spawned
         if let Some(ref mut child) = self.garbar_process {

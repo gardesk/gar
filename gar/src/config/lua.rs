@@ -68,6 +68,8 @@ pub struct LuaState {
     pub callbacks: Vec<mlua::RegistryKey>,
     pub rules: Vec<WindowRule>,
     pub exec_once_cmds: HashSet<String>,
+    /// PIDs of processes spawned via gar.exec()/gar.exec_once()
+    pub spawned_pids: Vec<u32>,
 }
 
 impl Default for LuaState {
@@ -78,6 +80,24 @@ impl Default for LuaState {
             callbacks: Vec::new(),
             rules: Vec::new(),
             exec_once_cmds: HashSet::new(),
+            spawned_pids: Vec::new(),
+        }
+    }
+}
+
+impl LuaState {
+    /// Kill all processes spawned via gar.exec()/gar.exec_once()
+    /// Called on gar shutdown to clean up child processes
+    pub fn kill_spawned_children(&self) {
+        tracing::info!("Killing {} spawned child processes", self.spawned_pids.len());
+        for &pid in &self.spawned_pids {
+            // Check if process still exists before trying to kill
+            // SAFETY: Sending signal 0 just checks if process exists
+            let exists = unsafe { libc::kill(pid as i32, 0) == 0 };
+            if exists {
+                tracing::debug!("Sending SIGTERM to PID {}", pid);
+                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+            }
         }
     }
 }
@@ -619,33 +639,48 @@ impl LuaConfig {
     }
 
     fn register_exec(&self, gar: &Table) -> LuaResult<()> {
-        let exec_fn = self.lua.create_function(|_, cmd: String| {
+        // gar.exec(cmd) - spawn a command, track PID for cleanup on exit
+        let state = Arc::clone(&self.state);
+        let exec_fn = self.lua.create_function(move |_, cmd: String| {
             tracing::debug!("exec: {}", cmd);
-            std::process::Command::new("sh")
+            if let Ok(child) = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(&cmd)
                 .spawn()
-                .ok();
+            {
+                let pid = child.id();
+                tracing::debug!("exec: spawned PID {}", pid);
+                if let Ok(mut state) = state.lock() {
+                    state.spawned_pids.push(pid);
+                }
+            }
             Ok(())
         })?;
         gar.set("exec", exec_fn)?;
 
         // gar.exec_once(cmd) - only run if not already run this session
-        let state = Arc::clone(&self.state);
+        let state_once = Arc::clone(&self.state);
         let exec_once_fn = self.lua.create_function(move |_, cmd: String| {
-            let mut state = state.lock().unwrap();
-            if state.exec_once_cmds.contains(&cmd) {
-                tracing::debug!("exec_once: skipping already-run command: {}", cmd);
-                return Ok(());
+            {
+                let state = state_once.lock().unwrap();
+                if state.exec_once_cmds.contains(&cmd) {
+                    tracing::debug!("exec_once: skipping already-run command: {}", cmd);
+                    return Ok(());
+                }
             }
             tracing::info!("exec_once: {}", cmd);
-            state.exec_once_cmds.insert(cmd.clone());
-            drop(state); // Release lock before spawning
-            std::process::Command::new("sh")
+            if let Ok(child) = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(&cmd)
                 .spawn()
-                .ok();
+            {
+                let pid = child.id();
+                tracing::debug!("exec_once: spawned PID {}", pid);
+                if let Ok(mut state) = state_once.lock() {
+                    state.exec_once_cmds.insert(cmd);
+                    state.spawned_pids.push(pid);
+                }
+            }
             Ok(())
         })?;
         gar.set("exec_once", exec_once_fn)
