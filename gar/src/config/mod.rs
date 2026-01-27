@@ -35,6 +35,8 @@ pub struct Config {
     pub bar_height: u32,
     // garbar integration: spawn garbar automatically if gar.bar is configured
     pub bar_enabled: bool,
+    // garnotify integration: spawn garnotify automatically if gar.notification is configured
+    pub notification_enabled: bool,
     // Monitor ordering: list of monitor names in desired left-to-right order
     // If empty, monitors are sorted by X position (default)
     pub monitor_order: Vec<String>,
@@ -476,6 +478,8 @@ impl Default for Config {
             bar_height: 0,
             // garbar not enabled by default (enabled when gar.bar table is set)
             bar_enabled: false,
+            // garnotify not enabled by default (enabled when gar.notification table is set)
+            notification_enabled: false,
             // Monitor order: empty = sort by X position
             monitor_order: Vec::new(),
             // Screen timeout: enabled by default with 10 minute timeout

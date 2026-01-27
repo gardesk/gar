@@ -236,6 +236,125 @@ fn reload_garbar(child: &std::process::Child) {
         libc::kill(child.id() as i32, libc::SIGHUP);
     }
 }
+
+// ============================================================================
+// garnotify integration - auto-spawn notification daemon
+// ============================================================================
+
+/// Get garnotify socket path
+fn garnotify_socket_path() -> String {
+    std::env::var("XDG_RUNTIME_DIR")
+        .map(|dir| format!("{}/garnotify.sock", dir))
+        .unwrap_or_else(|_| "/tmp/garnotify.sock".to_string())
+}
+
+/// Check if garnotify is healthy (socket exists)
+fn is_garnotify_healthy() -> bool {
+    std::path::Path::new(&garnotify_socket_path()).exists()
+}
+
+/// Spawn garnotify notification daemon
+fn spawn_garnotify() -> Option<std::process::Child> {
+    tracing::info!("Spawning garnotify...");
+
+    // Try to find garnotify in PATH or common locations
+    let garnotify_cmd = which_garnotify().unwrap_or_else(|| "garnotify".to_string());
+
+    // Inherit DISPLAY from current environment
+    let x_display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string());
+
+    match Command::new(&garnotify_cmd)
+        .arg("daemon")
+        .env("DISPLAY", &x_display)
+        .spawn()
+    {
+        Ok(child) => {
+            tracing::info!("garnotify started (PID {}), DISPLAY={}", child.id(), x_display);
+
+            // Wait briefly and verify garnotify becomes healthy
+            for attempt in 1..=10 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if is_garnotify_healthy() {
+                    tracing::info!("garnotify socket ready after {}ms", attempt * 200);
+                    return Some(child);
+                }
+            }
+
+            // Socket never appeared - might still be starting up
+            tracing::warn!("garnotify socket not ready after 2s, may still be starting");
+            Some(child)
+        }
+        Err(e) => {
+            tracing::error!("Failed to spawn garnotify: {}", e);
+            tracing::info!("Hint: Ensure garnotify is installed and in PATH");
+            None
+        }
+    }
+}
+
+/// Find garnotify executable
+fn which_garnotify() -> Option<String> {
+    // Check if garnotify is in PATH
+    if Command::new("which")
+        .arg("garnotify")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return Some("garnotify".to_string());
+    }
+
+    // Check common cargo install location
+    if let Ok(home) = std::env::var("HOME") {
+        let cargo_bin = format!("{}/.cargo/bin/garnotify", home);
+        if std::path::Path::new(&cargo_bin).exists() {
+            return Some(cargo_bin);
+        }
+    }
+
+    // Check /usr/local/bin
+    if std::path::Path::new("/usr/local/bin/garnotify").exists() {
+        return Some("/usr/local/bin/garnotify".to_string());
+    }
+
+    None
+}
+
+/// Stop garnotify gracefully by sending SIGTERM.
+fn stop_garnotify(child: &mut std::process::Child) {
+    tracing::info!("Stopping garnotify (PID {})...", child.id());
+
+    // Send SIGTERM for graceful shutdown
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+
+    // Wait briefly for it to exit
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            tracing::info!("garnotify exited with status: {}", status);
+        }
+        Ok(None) => {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    tracing::info!("garnotify exited with status: {}", status);
+                }
+                Ok(None) => {
+                    tracing::warn!("garnotify did not exit gracefully, sending SIGKILL");
+                    let _ = child.kill();
+                }
+                Err(e) => {
+                    tracing::warn!("Error waiting for garnotify: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Error checking garnotify status: {}", e);
+        }
+    }
+}
+
 use x11rb::protocol::xproto::{
     ButtonPressEvent, ButtonReleaseEvent, ClientMessageEvent, ConfigureRequestEvent,
     ConfigureWindowAux, ConnectionExt, DestroyNotifyEvent, EnterNotifyEvent, EventMask,
@@ -2503,6 +2622,11 @@ impl WindowManager {
             self.garbar_process = spawn_garbar();
         }
 
+        // Spawn garnotify if gar.notification is configured
+        if self.config.notification_enabled {
+            self.garnotify_process = spawn_garnotify();
+        }
+
         while self.running {
             // Handle X11 events (non-blocking poll)
             while let Some(event) = self.conn.conn.poll_for_event()? {
@@ -2538,6 +2662,12 @@ impl WindowManager {
             stop_garbar(child);
         }
         self.garbar_process = None;
+
+        // Stop garnotify if it was spawned
+        if let Some(ref mut child) = self.garnotify_process {
+            stop_garnotify(child);
+        }
+        self.garnotify_process = None;
 
         // Kill picom to prevent compositor effects from bleeding into the greeter
         tracing::info!("Killing picom...");

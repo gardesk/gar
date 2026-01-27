@@ -50,6 +50,8 @@ pub struct WindowManager {
     pub tiled_edge_cursor: Option<(XWindow, XWindow, Direction)>,
     /// garbar child process (managed automatically when gar.bar is configured)
     pub garbar_process: Option<std::process::Child>,
+    /// garnotify child process (managed automatically when gar.notification is configured)
+    pub garnotify_process: Option<std::process::Child>,
     /// Directional focus memory: (source_window, direction) -> last_target_window
     /// Used to remember which window was focused when navigating in a direction
     pub directional_focus_memory: HashMap<(XWindow, Direction), XWindow>,
@@ -156,6 +158,7 @@ impl WindowManager {
             current_edge_cursor: None,
             tiled_edge_cursor: None,
             garbar_process: None,
+            garnotify_process: None,
             directional_focus_memory: HashMap::new(),
         })
     }
