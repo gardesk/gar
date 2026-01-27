@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -95,8 +96,10 @@ impl LuaState {
             // SAFETY: Sending signal 0 just checks if process exists
             let exists = unsafe { libc::kill(pid as i32, 0) == 0 };
             if exists {
-                tracing::debug!("Sending SIGTERM to PID {}", pid);
-                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                // Kill the entire process group (negative PID) to get children too
+                // This handles cases like "sh -c garterm" where sh spawns garterm
+                tracing::debug!("Sending SIGTERM to process group {}", pid);
+                unsafe { libc::kill(-(pid as i32), libc::SIGTERM); }
             }
         }
     }
@@ -643,9 +646,12 @@ impl LuaConfig {
         let state = Arc::clone(&self.state);
         let exec_fn = self.lua.create_function(move |_, cmd: String| {
             tracing::debug!("exec: {}", cmd);
+            // process_group(0) makes the child its own process group leader
+            // so we can kill the entire group (including grandchildren) on exit
             if let Ok(child) = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(&cmd)
+                .process_group(0)
                 .spawn()
             {
                 let pid = child.id();
@@ -669,9 +675,12 @@ impl LuaConfig {
                 }
             }
             tracing::info!("exec_once: {}", cmd);
+            // process_group(0) makes the child its own process group leader
+            // so we can kill the entire group (including grandchildren) on exit
             if let Ok(child) = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(&cmd)
+                .process_group(0)
                 .spawn()
             {
                 let pid = child.id();
