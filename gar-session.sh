@@ -2,10 +2,10 @@
 # gar session wrapper - sets up environment before starting gar
 # This script is typically installed to /usr/local/share/gar/gar-session.sh
 
-# Find gar binary - check common locations
+# Find gar binary - check common locations (user local first for dev overrides)
 GAR_BIN="${GAR_BIN:-}"
 if [ -z "$GAR_BIN" ]; then
-    for path in /usr/local/bin/gar /usr/bin/gar "$HOME/.local/bin/gar"; do
+    for path in "$HOME/.local/bin/gar" /usr/local/bin/gar /usr/bin/gar; do
         if [ -x "$path" ]; then
             GAR_BIN="$path"
             break
