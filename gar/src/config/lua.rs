@@ -383,9 +383,27 @@ impl LuaConfig {
                         state.config.mouse_follows_focus = v;
                     }
                 }
+                "focus_follows_mouse" => {
+                    if let Value::Boolean(v) = value {
+                        state.config.focus_follows_mouse = v;
+                    }
+                }
                 "bar_height" => {
                     if let Value::Integer(v) = value {
                         state.config.bar_height = v as u32;
+                    }
+                }
+                // Compositor selection: "picom", "garchomp", or "none"
+                "compositor" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            let comp = str_val.to_lowercase();
+                            if comp == "picom" || comp == "garchomp" || comp == "none" {
+                                state.config.compositor = comp;
+                            } else {
+                                tracing::warn!("Unknown compositor '{}', using 'picom'", str_val);
+                            }
+                        }
                     }
                 }
                 // Compositor visual settings (picom)

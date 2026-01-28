@@ -31,6 +31,7 @@ pub struct Config {
     // Behavior settings
     pub follow_window_on_move: bool,
     pub mouse_follows_focus: bool,
+    pub focus_follows_mouse: bool,
     // Manual bar/panel reserved space (overrides struts)
     pub bar_height: u32,
     // garbar integration: spawn garbar automatically if gar.bar is configured
@@ -43,6 +44,8 @@ pub struct Config {
     // Screen timeout/DPMS settings
     pub screen_timeout_enabled: bool,
     pub screen_timeout_seconds: u32,
+    // Compositor selection: "picom" (default), "garchomp", or "none"
+    pub compositor: String,
     // Compositor visual settings (picom)
     // These are stored for reference and potential dynamic picom config generation
     pub corner_radius: u32,
@@ -326,8 +329,15 @@ wintypes:
         )
     }
 
-    /// Write picom config to ~/.config/gar/picom.conf and signal picom to reload.
+    /// Write picom config to ~/.config/gar/picom.conf and optionally restart picom.
+    /// Only writes/restarts if compositor is set to "picom".
     pub fn write_picom_config(&self) -> std::io::Result<()> {
+        // Only generate picom config if using picom
+        if self.compositor != "picom" {
+            tracing::debug!("Skipping picom config (compositor={})", self.compositor);
+            return Ok(());
+        }
+
         let config_dir = dirs::config_dir()
             .ok_or_else(|| std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -348,6 +358,61 @@ wintypes:
         Self::reload_picom();
 
         Ok(())
+    }
+
+    /// Start the configured compositor.
+    /// Called on gar startup to launch the appropriate compositor.
+    pub fn start_compositor(&self) {
+        use std::process::Command;
+
+        match self.compositor.as_str() {
+            "picom" => {
+                // Generate picom config first
+                if let Err(e) = self.write_picom_config() {
+                    tracing::warn!("Failed to write picom config: {}", e);
+                }
+                // picom will be started by write_picom_config -> reload_picom
+            }
+            "garchomp" => {
+                // Kill any existing compositor first
+                let _ = Command::new("pkill").arg("picom").status();
+                let _ = Command::new("pkill").arg("garchomp").status();
+
+                std::thread::sleep(std::time::Duration::from_millis(100));
+
+                // Start garchomp
+                match Command::new("garchomp").spawn() {
+                    Ok(_) => {
+                        tracing::info!("Started garchomp compositor");
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to start garchomp: {}", e);
+                        // Fall back to picom
+                        tracing::info!("Falling back to picom");
+                        Self::reload_picom();
+                    }
+                }
+            }
+            "none" => {
+                tracing::info!("Compositor disabled (compositor=none)");
+                // Kill any running compositor
+                let _ = Command::new("pkill").arg("picom").status();
+                let _ = Command::new("pkill").arg("garchomp").status();
+            }
+            _ => {
+                tracing::warn!("Unknown compositor '{}', defaulting to picom", self.compositor);
+                if let Err(e) = self.write_picom_config() {
+                    tracing::warn!("Failed to write picom config: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Stop any running compositor.
+    pub fn stop_compositor() {
+        use std::process::Command;
+        let _ = Command::new("pkill").arg("picom").status();
+        let _ = Command::new("pkill").arg("garchomp").status();
     }
 
     /// Apply screen timeout/DPMS settings using xset
@@ -474,6 +539,8 @@ impl Default for Config {
             follow_window_on_move: false,
             // Behavior: warp mouse pointer to center of focused window
             mouse_follows_focus: false,
+            // Behavior: focus window when mouse enters it
+            focus_follows_mouse: true,
             // Manual bar height (0 = use struts from dock windows)
             bar_height: 0,
             // garbar not enabled by default (enabled when gar.bar table is set)
@@ -485,6 +552,8 @@ impl Default for Config {
             // Screen timeout: enabled by default with 10 minute timeout
             screen_timeout_enabled: true,
             screen_timeout_seconds: 600,
+            // Compositor selection: "picom" (default), "garchomp", or "none"
+            compositor: "picom".to_string(),
             // Compositor settings (picom) - matching picom.conf defaults
             corner_radius: 12,
             blur_enabled: true,

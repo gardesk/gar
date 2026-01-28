@@ -75,10 +75,8 @@ impl WindowManager {
         // Get config values from Lua state
         let config = lua_state.lock().unwrap().config.clone();
 
-        // Generate picom config from settings
-        if let Err(e) = config.write_picom_config() {
-            tracing::warn!("Failed to generate picom config: {}", e);
-        }
+        // Start the configured compositor (picom, garchomp, or none)
+        config.start_compositor();
 
         // Apply screen timeout/DPMS settings
         config.apply_screen_timeout();
