@@ -693,9 +693,10 @@ impl WindowManager {
         // Flush to ensure ConfigureWindow requests are processed before we query geometry
         self.conn.flush()?;
 
-        // Focus the new window if on a visible workspace
+        // Focus and raise the new window if on a visible workspace
         if target_visible {
             self.set_focus(window, true)?;
+            self.raise_window(window)?;
         }
 
         Ok(())
@@ -2983,9 +2984,13 @@ impl WindowManager {
         // Update stacking order in workspace's floating list
         self.current_workspace_mut().raise_floating(window);
 
-        // Raise in X11
+        // Raise in X11 - if window has a frame, raise the frame instead
         let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
-        self.conn.conn.configure_window(window, &aux)?;
+        if let Some(frame) = self.frames.frame_for_client(window) {
+            self.conn.conn.configure_window(frame, &aux)?;
+        } else {
+            self.conn.conn.configure_window(window, &aux)?;
+        }
         self.conn.flush()?;
         Ok(())
     }
