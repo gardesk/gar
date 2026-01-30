@@ -2984,13 +2984,39 @@ impl WindowManager {
         // Update stacking order in workspace's floating list
         self.current_workspace_mut().raise_floating(window);
 
-        // Raise in X11 - if window has a frame, raise the frame instead
-        let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
-        if let Some(frame) = self.frames.frame_for_client(window) {
-            self.conn.conn.configure_window(frame, &aux)?;
-        } else {
-            self.conn.conn.configure_window(window, &aux)?;
+        // Get the window (or frame) to raise
+        let window_to_raise = self.frames.frame_for_client(window).unwrap_or(window);
+
+        // First, find the topmost tiled window across all visible workspaces
+        // and raise above it to ensure we're above everything
+        let visible_ws: Vec<usize> = self.monitors.iter().map(|m| m.active_workspace).collect();
+        let mut topmost_tiled: Option<u32> = None;
+
+        for ws_idx in visible_ws {
+            if let Some(ws) = self.workspaces.get(ws_idx) {
+                // Get tiled windows from the tree
+                for win_id in ws.tree.windows() {
+                    if let Some(frame) = self.frames.frame_for_client(win_id) {
+                        topmost_tiled = Some(frame);
+                    } else {
+                        topmost_tiled = Some(win_id);
+                    }
+                }
+            }
         }
+
+        // Raise the window - if we found a tiled window, raise above it explicitly
+        if let Some(sibling) = topmost_tiled {
+            let aux = ConfigureWindowAux::new()
+                .sibling(sibling)
+                .stack_mode(StackMode::ABOVE);
+            self.conn.conn.configure_window(window_to_raise, &aux)?;
+        }
+
+        // Then raise to absolute top with plain ABOVE
+        let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+        self.conn.conn.configure_window(window_to_raise, &aux)?;
+
         self.conn.flush()?;
         Ok(())
     }
