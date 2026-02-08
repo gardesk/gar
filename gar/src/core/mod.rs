@@ -974,6 +974,12 @@ impl WindowManager {
                         border_width as u16,
                     )?;
 
+                    // Ensure tiled frame is below floating windows by stacking at bottom
+                    if let Some(frame) = self.frames.frame_for_client(*window) {
+                        let aux = ConfigureWindowAux::new().stack_mode(StackMode::BELOW);
+                        self.conn.conn.configure_window(frame, &aux)?;
+                    }
+
                     tracing::debug!(
                         "apply_layout: TILED+FRAME window={} at ({}, {}) size {}x{} (titlebar: {})",
                         window, gapped_x, gapped_y, final_width.max(1), final_height.max(1), titlebar_height
@@ -992,6 +998,10 @@ impl WindowManager {
                         final_height.max(1),
                         border_width,
                     )?;
+
+                    // Ensure tiled window is below floating windows
+                    let aux = ConfigureWindowAux::new().stack_mode(StackMode::BELOW);
+                    self.conn.conn.configure_window(*window, &aux)?;
                 }
 
                 // Store the actual geometry for pointer warping
@@ -1034,18 +1044,17 @@ impl WindowManager {
                     if let Some(frame) = self.frames.frame_for_client(window_id) {
                         let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
                         self.conn.conn.configure_window(frame, &aux)?;
+                        tracing::info!(
+                            "apply_layout: FLOATING+FRAME window={} frame={} raised ABOVE (at ({}, {}) size {}x{})",
+                            window_id, frame, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
+                        );
+                    } else {
+                        tracing::warn!(
+                            "apply_layout: FLOATING window={} has_frame=true but no frame found!",
+                            window_id
+                        );
                     }
-
-                    tracing::debug!(
-                        "apply_layout: FLOATING+FRAME window={} at ({}, {}) size {}x{} (raising)",
-                        window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
-                    );
                 } else {
-                    tracing::debug!(
-                        "apply_layout: FLOATING window={} at ({}, {}) size {}x{} (raising)",
-                        window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
-                    );
-
                     // Configure geometry
                     self.conn.configure_window(
                         window_id,
@@ -1059,6 +1068,11 @@ impl WindowManager {
                     // Raise to top of stack (each subsequent window goes above the previous)
                     let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
                     self.conn.conn.configure_window(window_id, &aux)?;
+
+                    tracing::info!(
+                        "apply_layout: FLOATING window={} raised ABOVE (at ({}, {}) size {}x{})",
+                        window_id, geom.x, geom.y, adjusted_width.max(1), adjusted_height.max(1)
+                    );
                 }
 
                 // Store the actual geometry for pointer warping

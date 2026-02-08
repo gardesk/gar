@@ -65,6 +65,7 @@ pub struct Connection {
     pub net_wm_state: Atom,
     pub net_wm_state_modal: Atom,
     pub net_wm_state_fullscreen: Atom,
+    pub net_wm_state_above: Atom,
     // EWMH atoms for workspaces
     pub net_supported: Atom,
     pub net_supporting_wm_check: Atom,
@@ -133,6 +134,7 @@ impl Connection {
         let net_wm_state = conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom;
         let net_wm_state_modal = conn.intern_atom(false, b"_NET_WM_STATE_MODAL")?.reply()?.atom;
         let net_wm_state_fullscreen = conn.intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")?.reply()?.atom;
+        let net_wm_state_above = conn.intern_atom(false, b"_NET_WM_STATE_ABOVE")?.reply()?.atom;
 
         // Intern EWMH atoms for workspaces and WM identification
         let net_supported = conn.intern_atom(false, b"_NET_SUPPORTED")?.reply()?.atom;
@@ -199,6 +201,7 @@ impl Connection {
             net_wm_state,
             net_wm_state_modal,
             net_wm_state_fullscreen,
+            net_wm_state_above,
             net_supported,
             net_supporting_wm_check,
             net_client_list,
@@ -769,7 +772,7 @@ impl Connection {
             }
         }
 
-        // 3. Check _NET_WM_STATE for modal windows
+        // 3. Check _NET_WM_STATE for modal or above windows
         if let Ok(cookie) = self.conn.get_property(
             false,
             window,
@@ -784,6 +787,10 @@ impl Connection {
                         let atom = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                         if atom == self.net_wm_state_modal {
                             tracing::debug!("Window {} is modal, should float", window);
+                            return true;
+                        }
+                        if atom == self.net_wm_state_above {
+                            tracing::debug!("Window {} has ABOVE state, should float", window);
                             return true;
                         }
                     }
@@ -1067,6 +1074,8 @@ impl Connection {
             self.net_close_window,
             self.net_wm_state,
             self.net_wm_state_fullscreen,
+            self.net_wm_state_modal,
+            self.net_wm_state_above,
             self.net_wm_name,
         ];
         self.conn.change_property32(

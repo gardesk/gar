@@ -1059,8 +1059,11 @@ impl WindowManager {
                 self.conn.flush()?;
                 return Ok(());
             }
-            // Not on edge - if this is a focused floating window, replay the click
+            // Not on edge - if this is a focused floating window, raise it and replay the click
+            // This ensures clicking on a floating window that somehow ended up behind
+            // other windows will bring it to the front
             if self.focused_window == Some(window) {
+                self.raise_window(window)?;
                 self.conn.conn.allow_events(
                     x11rb::protocol::xproto::Allow::REPLAY_POINTER,
                     x11rb::CURRENT_TIME,
@@ -1773,6 +1776,19 @@ impl WindowManager {
                     2 => {
                         // Toggle fullscreen
                         self.toggle_fullscreen(window)?;
+                    }
+                    _ => {}
+                }
+            }
+            // Handle ABOVE state changes - raise window when requested
+            else if property == self.conn.net_wm_state_above {
+                match action {
+                    1 | 2 => {
+                        // Add or toggle ABOVE - raise the window
+                        tracing::info!("Window {} requesting ABOVE state, raising", window);
+                        if self.windows.contains_key(&window) {
+                            self.raise_window(window)?;
+                        }
                     }
                     _ => {}
                 }
@@ -2987,8 +3003,10 @@ impl WindowManager {
         // Raise in X11 - if window has a frame, raise the frame instead
         let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
         if let Some(frame) = self.frames.frame_for_client(window) {
+            tracing::info!("raise_window: window={} -> raising frame={}", window, frame);
             self.conn.conn.configure_window(frame, &aux)?;
         } else {
+            tracing::info!("raise_window: window={} (no frame)", window);
             self.conn.conn.configure_window(window, &aux)?;
         }
         self.conn.flush()?;
