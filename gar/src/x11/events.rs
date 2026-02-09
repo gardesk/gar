@@ -574,8 +574,15 @@ impl WindowManager {
             Event::EnterNotify(e) => {
                 self.handle_enter_notify(e)?;
             }
-            Event::RandrScreenChangeNotify(_) => {
-                tracing::info!("RandR screen change detected, refreshing monitors");
+            Event::RandrScreenChangeNotify(e) => {
+                tracing::info!(
+                    "RandR screen change: {}x{} -> {}x{}",
+                    self.conn.screen_width, self.conn.screen_height,
+                    e.width, e.height
+                );
+                // Update cached screen dimensions from the event
+                self.conn.screen_width = e.width;
+                self.conn.screen_height = e.height;
                 self.refresh_monitors()?;
                 self.broadcast_i3_output_event();
             }

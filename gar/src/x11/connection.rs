@@ -1336,6 +1336,38 @@ impl Connection {
         )?;
         Ok(())
     }
+
+    /// Update cached screen dimensions using RandR query.
+    /// Called after RandR events when we don't have the new size from the event.
+    pub fn update_screen_size(&mut self) {
+        use x11rb::protocol::randr::ConnectionExt as RandrExt;
+
+        // Query current screen size from RandR
+        if let Ok(reply) = self.conn.randr_get_screen_info(self.root) {
+            if let Ok(info) = reply.reply() {
+                // Get the size from the current rotation/size index
+                if let Some(size) = info.sizes.get(info.size_id as usize) {
+                    let (new_w, new_h) = if info.rotation.contains(x11rb::protocol::randr::Rotation::ROTATE90)
+                        || info.rotation.contains(x11rb::protocol::randr::Rotation::ROTATE270)
+                    {
+                        // Rotated 90 or 270 - swap dimensions
+                        (size.height, size.width)
+                    } else {
+                        (size.width, size.height)
+                    };
+
+                    if new_w != self.screen_width || new_h != self.screen_height {
+                        tracing::info!(
+                            "Screen size updated: {}x{} -> {}x{}",
+                            self.screen_width, self.screen_height, new_w, new_h
+                        );
+                        self.screen_width = new_w;
+                        self.screen_height = new_h;
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl std::ops::Deref for Connection {

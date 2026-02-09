@@ -292,6 +292,9 @@ impl WindowManager {
     pub fn refresh_monitors(&mut self) -> Result<()> {
         tracing::info!("Refreshing monitor configuration");
 
+        // Update cached screen dimensions (may have changed due to rotation)
+        self.conn.update_screen_size();
+
         let mut new_monitors = self.conn.detect_monitors().unwrap_or_else(|e| {
             tracing::warn!("Failed to detect monitors: {}, keeping current", e);
             return self.monitors.clone();
