@@ -374,9 +374,9 @@ wintypes:
                 // picom will be started by write_picom_config -> reload_picom
             }
             "garchomp" => {
-                // Kill any existing compositor first
-                let _ = Command::new("pkill").arg("picom").status();
-                let _ = Command::new("pkill").arg("garchomp").status();
+                // Kill any existing compositor first (use -f for NixOS wrappers)
+                let _ = Command::new("pkill").args(["-f", "picom"]).status();
+                let _ = Command::new("pkill").args(["-f", "garchomp"]).status();
 
                 std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -395,9 +395,9 @@ wintypes:
             }
             "none" => {
                 tracing::info!("Compositor disabled (compositor=none)");
-                // Kill any running compositor
-                let _ = Command::new("pkill").arg("picom").status();
-                let _ = Command::new("pkill").arg("garchomp").status();
+                // Kill any running compositor (use -f for NixOS wrappers)
+                let _ = Command::new("pkill").args(["-f", "picom"]).status();
+                let _ = Command::new("pkill").args(["-f", "garchomp"]).status();
             }
             _ => {
                 tracing::warn!("Unknown compositor '{}', defaulting to picom", self.compositor);
@@ -411,8 +411,9 @@ wintypes:
     /// Stop any running compositor.
     pub fn stop_compositor() {
         use std::process::Command;
-        let _ = Command::new("pkill").arg("picom").status();
-        let _ = Command::new("pkill").arg("garchomp").status();
+        // Use -f to match full command line (needed for NixOS wrappers)
+        let _ = Command::new("pkill").args(["-f", "picom"]).status();
+        let _ = Command::new("pkill").args(["-f", "garchomp"]).status();
     }
 
     /// Apply screen timeout/DPMS settings using xset

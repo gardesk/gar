@@ -2714,11 +2714,14 @@ impl WindowManager {
         }
         self.garnotify_process = None;
 
-        // Kill picom to prevent compositor effects from bleeding into the greeter
-        tracing::info!("Killing picom...");
+        // Kill compositor to prevent overlay from bleeding into the greeter
+        tracing::info!("Killing compositor...");
+        // Use -f to match against full command line (needed for NixOS wrappers)
         let _ = std::process::Command::new("pkill")
-            .arg("-x")
-            .arg("picom")
+            .args(["-f", "garchomp"])
+            .status();
+        let _ = std::process::Command::new("pkill")
+            .args(["-f", "picom"])
             .status();
 
         // Signal systemd that graphical session has ended
