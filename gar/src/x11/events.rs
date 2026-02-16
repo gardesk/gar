@@ -2274,6 +2274,14 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Force refresh layout - just re-apply layout.
+    /// Note: GTK apps may not fully re-render at new scale without restart.
+    fn force_refresh_layout(&mut self) -> Result<()> {
+        self.apply_layout()?;
+        tracing::info!("Layout refreshed");
+        Ok(())
+    }
+
     /// Execute an i3-compatible command (from IPC RUN_COMMAND).
     /// Returns true if the command was executed successfully.
     fn execute_i3_command(&mut self, cmd: &str) -> bool {
@@ -2829,6 +2837,18 @@ impl WindowManager {
             "equalize" => {
                 match self.equalize() {
                     Ok(_) => Response::success(None),
+                    Err(e) => Response::error(e.to_string()),
+                }
+            }
+            "refresh_layout" => {
+                // Re-apply layout to all windows without changing ratios.
+                // Useful after display scaling changes when GTK apps resize internally.
+                // Two-step approach: first shrink windows, then expand - forces GTK to re-layout.
+                match self.force_refresh_layout() {
+                    Ok(_) => {
+                        tracing::info!("Layout force-refreshed");
+                        Response::success(None)
+                    }
                     Err(e) => Response::error(e.to_string()),
                 }
             }

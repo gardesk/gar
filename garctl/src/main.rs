@@ -49,6 +49,8 @@ enum Command {
     ToggleFloating,
     /// Equalize split ratios
     Equalize,
+    /// Refresh window layout (re-apply without changing ratios)
+    RefreshLayout,
     /// Reload configuration
     Reload,
     /// Exit gar
@@ -128,6 +130,9 @@ fn main() {
         }
         Command::Equalize => {
             json!({ "command": "equalize", "args": {} })
+        }
+        Command::RefreshLayout => {
+            json!({ "command": "refresh_layout", "args": {} })
         }
         Command::Reload => {
             json!({ "command": "reload", "args": {} })
