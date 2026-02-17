@@ -52,17 +52,9 @@ systemctl --user start gar-session.target
 
 # ═══════════════════════════════════════════════════════════════════
 
-# Launch compositor before WM (for proper screen repainting)
-# gar generates picom.conf on startup and signals picom to reload
-if command -v picom &> /dev/null; then
-    if [[ -f ~/.config/gar/picom.conf ]]; then
-        picom -b --config ~/.config/gar/picom.conf &
-    else
-        # First run: start with GLX backend, gar will generate config and signal reload
-        picom -b --backend glx &
-    fi
-    sleep 0.1
-fi
+# Compositor is now managed by gar itself via start_compositor()
+# based on the "compositor" setting in init.lua ("picom", "garchomp", or "none")
+# Do NOT start picom here - it causes dual-compositor conflicts when garchomp is selected
 
 # Set log level
 export GAR_LOG=info
