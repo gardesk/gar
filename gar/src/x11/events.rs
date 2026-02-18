@@ -3141,11 +3141,17 @@ impl WindowManager {
             window, target_idx, self.monitors[target_idx].name, target_workspace + 1);
 
         // Remove from current workspace
+        let source_ws = self.focused_workspace;
         if is_floating {
             self.current_workspace_mut().remove_floating(window);
         } else {
             self.current_workspace_mut().tree.remove(window);
         }
+
+        // Update focus on source workspace so it doesn't point to the moved window
+        let new_focus_on_source = self.workspaces[source_ws].tree.first_window()
+            .or_else(|| self.workspaces[source_ws].floating.last().copied());
+        self.workspaces[source_ws].focused = new_focus_on_source;
 
         // Update window's workspace
         if let Some(win) = self.windows.get_mut(&window) {
