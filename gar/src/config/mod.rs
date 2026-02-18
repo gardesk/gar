@@ -415,62 +415,53 @@ wintypes:
         let _ = Command::new("pkill").args(["-f", "garchomp"]).status();
     }
 
-    /// Apply screen timeout/DPMS settings using xset
+    /// Apply screen timeout settings using xset.
+    ///
+    /// Always disables hardware DPMS (causes Xid 79 GPU crashes on NVIDIA with
+    /// multi-monitor HDMI setups). Uses the X11 screen saver extension for software
+    /// blanking instead, which draws black without hardware power state changes.
     pub fn apply_screen_timeout(&self) {
         use std::process::Command;
 
-        if self.screen_timeout_enabled {
-            // Enable DPMS and set timeout
-            let timeout = self.screen_timeout_seconds.to_string();
-            match Command::new("xset")
-                .args(["dpms", &timeout, &timeout, &timeout])
-                .status()
-            {
-                Ok(status) if status.success() => {
-                    tracing::info!("Set DPMS timeout to {} seconds", self.screen_timeout_seconds);
-                }
-                Ok(_) => tracing::warn!("xset dpms command failed"),
-                Err(e) => tracing::warn!("Failed to run xset: {}", e),
+        // Always disable hardware DPMS - it sends power state changes to monitors
+        // via the NVIDIA driver, which can crash the GPU (Xid 79) when HDMI displays
+        // have unreliable EDID links
+        match Command::new("xset").args(["dpms", "0", "0", "0"]).status() {
+            Ok(status) if status.success() => {
+                tracing::debug!("Disabled hardware DPMS timeouts");
             }
+            Ok(_) => tracing::warn!("xset dpms 0 command failed"),
+            Err(e) => tracing::warn!("Failed to run xset: {}", e),
+        }
+        match Command::new("xset").args(["-dpms"]).status() {
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Failed to disable DPMS: {}", e),
+        }
 
-            // Enable screen saver with same timeout
+        if self.screen_timeout_enabled {
+            // Use X11 screen saver for software blanking (safe, no hardware power changes)
+            let timeout = self.screen_timeout_seconds.to_string();
             match Command::new("xset")
                 .args(["s", &timeout, &timeout])
                 .status()
             {
                 Ok(status) if status.success() => {
-                    tracing::debug!("Set screen saver timeout to {} seconds", self.screen_timeout_seconds);
+                    tracing::info!(
+                        "Screen blanking enabled via X11 screen saver ({} seconds)",
+                        self.screen_timeout_seconds
+                    );
                 }
                 Ok(_) => tracing::warn!("xset s command failed"),
                 Err(e) => tracing::warn!("Failed to run xset: {}", e),
             }
-
-            // Make sure DPMS is enabled
-            match Command::new("xset").args(["+dpms"]).status() {
-                Ok(_) => {}
-                Err(e) => tracing::warn!("Failed to enable DPMS: {}", e),
-            }
         } else {
-            // Disable DPMS and screen saver
-            match Command::new("xset").args(["dpms", "0", "0", "0"]).status() {
-                Ok(status) if status.success() => {
-                    tracing::info!("Disabled DPMS timeout");
-                }
-                Ok(_) => tracing::warn!("xset dpms 0 command failed"),
-                Err(e) => tracing::warn!("Failed to run xset: {}", e),
-            }
-
+            // Disable screen saver blanking too
             match Command::new("xset").args(["s", "off"]).status() {
                 Ok(status) if status.success() => {
-                    tracing::debug!("Disabled screen saver");
+                    tracing::info!("Screen blanking disabled");
                 }
                 Ok(_) => tracing::warn!("xset s off command failed"),
                 Err(e) => tracing::warn!("Failed to run xset: {}", e),
-            }
-
-            match Command::new("xset").args(["-dpms"]).status() {
-                Ok(_) => {}
-                Err(e) => tracing::warn!("Failed to disable DPMS: {}", e),
             }
         }
     }
@@ -549,8 +540,8 @@ impl Default for Config {
             notification_enabled: false,
             // Monitor order: empty = sort by X position
             monitor_order: Vec::new(),
-            // Screen timeout: disabled by default (DPMS causes Xid 79 GPU crashes on NVIDIA)
-            screen_timeout_enabled: false,
+            // Screen timeout: enabled by default (uses software blanking, never hardware DPMS)
+            screen_timeout_enabled: true,
             screen_timeout_seconds: 600,
             // Compositor selection: "picom" (default), "garchomp", or "none"
             compositor: "picom".to_string(),
