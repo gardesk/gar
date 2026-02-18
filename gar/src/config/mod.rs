@@ -549,8 +549,8 @@ impl Default for Config {
             notification_enabled: false,
             // Monitor order: empty = sort by X position
             monitor_order: Vec::new(),
-            // Screen timeout: enabled by default with 10 minute timeout
-            screen_timeout_enabled: true,
+            // Screen timeout: disabled by default (DPMS causes Xid 79 GPU crashes on NVIDIA)
+            screen_timeout_enabled: false,
             screen_timeout_seconds: 600,
             // Compositor selection: "picom" (default), "garchomp", or "none"
             compositor: "picom".to_string(),
