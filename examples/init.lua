@@ -16,7 +16,11 @@ gar.exec_once("garclip daemon --foreground")
 gar.exec_once("gartray daemon")
 
 -- Polkit authentication agent (needed for power actions via D-Bus)
-gar.exec_once("/usr/libexec/kf6/polkit-kde-authentication-agent-1")
+gar.exec_once("garcard daemon")
+
+-- External fallback authentication agents (optional):
+-- gar.exec_once("/usr/libexec/kf6/polkit-kde-authentication-agent-1")
+-- gar.exec_once("/usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1")
 
 -- Uncomment the ones you want:
 -- gar.exec_once("picom")                      -- Compositor (for transparency/shadows)
