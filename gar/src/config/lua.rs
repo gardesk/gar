@@ -406,6 +406,19 @@ impl LuaConfig {
                         }
                     }
                 }
+                // Picom backend: "glx" or "xrender"
+                "compositor_backend" | "picom_backend" => {
+                    if let Value::String(s) = value {
+                        if let Ok(str_val) = s.to_str() {
+                            let backend = str_val.to_lowercase();
+                            if backend == "glx" || backend == "xrender" {
+                                state.config.picom_backend = backend;
+                            } else {
+                                tracing::warn!("Unknown compositor backend '{}', using 'glx'", str_val);
+                            }
+                        }
+                    }
+                }
                 // Compositor visual settings (picom)
                 "corner_radius" => {
                     if let Value::Integer(v) = value {

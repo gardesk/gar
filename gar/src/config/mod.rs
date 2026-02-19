@@ -46,6 +46,8 @@ pub struct Config {
     pub screen_timeout_seconds: u32,
     // Compositor selection: "picom" (default), "garchomp", or "none"
     pub compositor: String,
+    // Picom backend: "glx" (GPU) or "xrender" (CPU, safer on NVIDIA)
+    pub picom_backend: String,
     // Compositor visual settings (picom)
     // These are stored for reference and potential dynamic picom config generation
     pub corner_radius: u32,
@@ -82,6 +84,18 @@ impl Config {
     /// Generate picom.conf content from current config settings.
     pub fn generate_picom_config(&self) -> String {
         let blur_section = if self.blur_enabled {
+            // dual_kawase requires GLX backend; fall back to kernel blur on xrender
+            let (blur_method, blur_strength) = if self.picom_backend == "xrender"
+                && self.blur_method == "dual_kawase"
+            {
+                tracing::info!(
+                    "Switching blur from dual_kawase to kernel (xrender backend doesn't support dual_kawase)"
+                );
+                ("kernel".to_string(), self.blur_strength)
+            } else {
+                (self.blur_method.clone(), self.blur_strength)
+            };
+
             format!(
                 r#"# Blur
 blur-method = "{}";
@@ -98,7 +112,7 @@ blur-background-exclude = [
     "window_type = 'popup_menu'",
     "_NET_WM_BYPASS_COMPOSITOR = 1"
 ];"#,
-                self.blur_method, self.blur_strength
+                blur_method, blur_strength
             )
         } else {
             "# Blur disabled".to_string()
@@ -259,7 +273,7 @@ animations = ({{
 # Edit ~/.config/gar/init.lua instead and reload with Mod+Shift+R
 
 # Backend Configuration
-backend = "glx";
+backend = "{}";
 vsync = true;
 use-ewmh-active-win = true;
 
@@ -317,6 +331,7 @@ wintypes:
     }};
 }};
 "#,
+            self.picom_backend,
             self.corner_radius,
             blur_section,
             shadow_section,
@@ -545,6 +560,8 @@ impl Default for Config {
             screen_timeout_seconds: 600,
             // Compositor selection: "picom" (default), "garchomp", or "none"
             compositor: "picom".to_string(),
+            // Picom backend: "glx" (GPU) or "xrender" (CPU, safer on NVIDIA)
+            picom_backend: "glx".to_string(),
             // Compositor settings (picom) - matching picom.conf defaults
             corner_radius: 12,
             blur_enabled: true,
