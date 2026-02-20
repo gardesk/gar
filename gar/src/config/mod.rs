@@ -555,8 +555,9 @@ impl Default for Config {
             notification_enabled: false,
             // Monitor order: empty = sort by X position
             monitor_order: Vec::new(),
-            // Screen timeout: enabled by default (uses software blanking, never hardware DPMS)
-            screen_timeout_enabled: true,
+            // Screen timeout: disabled by default - X11 screen saver blanking triggers
+            // Xid 79 GPU crashes on NVIDIA with multi-monitor HDMI setups
+            screen_timeout_enabled: false,
             screen_timeout_seconds: 600,
             // Compositor selection: "picom" (default), "garchomp", or "none"
             compositor: "picom".to_string(),
