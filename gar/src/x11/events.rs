@@ -2206,6 +2206,7 @@ impl WindowManager {
         } else {
             // No windows on target monitor - clear focus and warp to monitor center
             self.focused_window = None;
+            self.conn.set_active_window(None)?;
             self.warp_to_monitor(target_idx)?;
             tracing::debug!("No windows on monitor {}, warped to center", target_idx);
         }
@@ -3103,8 +3104,9 @@ impl WindowManager {
             // set_focus handles grab/ungrab for old and new windows
             self.set_focus(window, true)?;
         } else {
-            // No windows - warp to monitor center
+            // No windows - clear EWMH active window and warp to monitor center
             self.focused_window = None;
+            self.conn.set_active_window(None)?;
             self.warp_to_monitor(target_idx)?;
         }
 
