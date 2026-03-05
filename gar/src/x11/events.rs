@@ -3076,11 +3076,15 @@ impl WindowManager {
         }
 
         tracing::info!("Focusing monitor {}: '{}'", target_idx, self.monitors[target_idx].name);
+        let old_workspace_idx = self.focused_workspace;
         self.focused_monitor = target_idx;
 
         // Focus the active workspace on that monitor
         let workspace_idx = self.monitors[target_idx].active_workspace;
         self.focused_workspace = workspace_idx;
+
+        // Update EWMH
+        self.conn.set_current_desktop(workspace_idx as u32)?;
 
         // Focus a window on that workspace if any, or warp to monitor center
         if let Some(window) = self.workspaces[workspace_idx].focused
@@ -3093,6 +3097,11 @@ impl WindowManager {
             // No windows - warp to monitor center
             self.focused_window = None;
             self.warp_to_monitor(target_idx)?;
+        }
+
+        // Broadcast i3 workspace event so garbar updates
+        if workspace_idx != old_workspace_idx {
+            self.broadcast_i3_workspace_event("focus", workspace_idx, Some(old_workspace_idx));
         }
 
         self.conn.flush()?;
@@ -3171,15 +3180,24 @@ impl WindowManager {
         self.conn.set_window_desktop(window, target_workspace as u32)?;
 
         // Focus follows window to new monitor
+        let old_workspace_idx = self.focused_workspace;
         self.focused_monitor = target_idx;
         self.focused_workspace = target_workspace;
         self.workspaces[target_workspace].focused = Some(window);
+
+        // Update EWMH
+        self.conn.set_current_desktop(target_workspace as u32)?;
 
         // Apply layouts on both monitors
         self.apply_layout()?;
 
         // Set X11 focus on the moved window (updates focused_window, button grabs, EWMH)
         self.set_focus(window, true)?;
+
+        // Broadcast i3 workspace event so garbar updates
+        if target_workspace != old_workspace_idx {
+            self.broadcast_i3_workspace_event("focus", target_workspace, Some(old_workspace_idx));
+        }
 
         self.conn.flush()?;
         Ok(())
