@@ -2186,11 +2186,15 @@ impl WindowManager {
         };
 
         tracing::info!("Moving focus from monitor {} to {}", self.focused_monitor, target_idx);
+        let old_workspace_idx = self.focused_workspace;
         self.focused_monitor = target_idx;
 
         // Focus the active workspace on that monitor
         let workspace_idx = self.monitors[target_idx].active_workspace;
         self.focused_workspace = workspace_idx;
+
+        // Update EWMH
+        self.conn.set_current_desktop(workspace_idx as u32)?;
 
         // Focus a window on that workspace if any, or just warp to monitor center
         if let Some(window) = self.workspaces[workspace_idx].focused
@@ -2204,6 +2208,11 @@ impl WindowManager {
             self.focused_window = None;
             self.warp_to_monitor(target_idx)?;
             tracing::debug!("No windows on monitor {}, warped to center", target_idx);
+        }
+
+        // Broadcast i3 workspace event so garbar updates
+        if workspace_idx != old_workspace_idx {
+            self.broadcast_i3_workspace_event("focus", workspace_idx, Some(old_workspace_idx));
         }
 
         self.conn.flush()?;
