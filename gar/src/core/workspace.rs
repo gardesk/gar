@@ -11,6 +11,8 @@ pub struct Workspace {
     pub floating: Vec<XWindow>,
     pub focused: Option<XWindow>,
     pub visible: bool,
+    /// Last monitor this workspace was displayed on (for focus-back behavior)
+    pub last_monitor: Option<usize>,
 }
 
 impl Workspace {
@@ -22,6 +24,7 @@ impl Workspace {
             floating: Vec::new(),
             focused: None,
             visible: id == 1,
+            last_monitor: None,
         }
     }
 

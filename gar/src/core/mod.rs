@@ -59,7 +59,7 @@ pub struct WindowManager {
 
 impl WindowManager {
     pub fn new(conn: Connection) -> Result<Self> {
-        let workspaces: Vec<Workspace> = (1..=10)
+        let mut workspaces: Vec<Workspace> = (1..=10)
             .map(|i| Workspace::new(i, i.to_string()))
             .collect();
 
@@ -131,6 +131,9 @@ impl WindowManager {
         for (i, monitor) in monitors.iter_mut().enumerate() {
             monitor.workspaces = vec![i]; // Just track initial workspace
             monitor.active_workspace = i; // Monitor 0 shows ws 0, monitor 1 shows ws 1, etc.
+            if i < workspaces.len() {
+                workspaces[i].last_monitor = Some(i);
+            }
             tracing::debug!("Monitor '{}' starts with workspace {}", monitor.name, i + 1);
         }
 
@@ -330,6 +333,9 @@ impl WindowManager {
                 monitor.active_workspace = first_free;
                 monitor.workspaces = vec![first_free];
                 used_workspaces.insert(first_free);
+            }
+            if monitor.active_workspace < self.workspaces.len() {
+                self.workspaces[monitor.active_workspace].last_monitor = Some(i);
             }
             tracing::info!("Monitor '{}' showing workspace {}", monitor.name, monitor.active_workspace + 1);
         }

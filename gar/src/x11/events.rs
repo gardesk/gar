@@ -2417,6 +2417,7 @@ impl WindowManager {
             // Focus the monitor that has this workspace
             self.focused_monitor = monitor_idx;
             self.focused_workspace = idx;
+            self.workspaces[idx].last_monitor = Some(monitor_idx);
 
             // Update EWMH
             self.conn.set_current_desktop(idx as u32)?;
@@ -2441,13 +2442,16 @@ impl WindowManager {
                 self.conn.set_active_window(None)?;
             }
         } else {
-            // Workspace not visible - show it on current monitor (i3 behavior)
-            let current_monitor = self.focused_monitor;
-            let old_ws = self.monitors[current_monitor].active_workspace;
+            // Workspace not visible — show it on the monitor it was last on,
+            // falling back to the current monitor if it was never shown.
+            let target_monitor = self.workspaces[idx].last_monitor
+                .filter(|&m| m < self.monitors.len())
+                .unwrap_or(self.focused_monitor);
+            let old_ws = self.monitors[target_monitor].active_workspace;
 
             tracing::info!(
                 "Switching monitor {} from workspace {} to {}",
-                current_monitor, old_ws + 1, idx + 1
+                target_monitor, old_ws + 1, idx + 1
             );
 
             // Hide windows on old workspace
@@ -2464,7 +2468,9 @@ impl WindowManager {
             }
 
             // Update monitor's active workspace
-            self.monitors[current_monitor].active_workspace = idx;
+            self.monitors[target_monitor].active_workspace = idx;
+            self.workspaces[idx].last_monitor = Some(target_monitor);
+            self.focused_monitor = target_monitor;
             self.focused_workspace = idx;
 
             // Update EWMH
@@ -2492,7 +2498,7 @@ impl WindowManager {
                 self.focused_window = None;
                 self.conn.set_active_window(None)?;
                 if warp_pointer {
-                    let monitor_geom = self.monitors[current_monitor].geometry;
+                    let monitor_geom = self.monitors[target_monitor].geometry;
                     let center_x = monitor_geom.x + (monitor_geom.width as i16 / 2);
                     let center_y = monitor_geom.y + (monitor_geom.height as i16 / 2);
                     self.conn.warp_pointer(center_x, center_y)?;
