@@ -1708,9 +1708,17 @@ impl WindowManager {
 
         tracing::debug!("Focus follows mouse: focusing window {}", window);
 
+        let old_workspace_idx = self.focused_workspace;
+
         // Focus the new window (no warp - mouse enter)
         // set_focus handles grab/ungrab for old and new windows
         self.set_focus(window, false)?;
+
+        // If workspace changed (cross-monitor mouse move), update EWMH and notify garbar
+        if self.focused_workspace != old_workspace_idx {
+            self.conn.set_current_desktop(self.focused_workspace as u32)?;
+            self.broadcast_i3_workspace_event("focus", self.focused_workspace, Some(old_workspace_idx));
+        }
 
         // Raise floating windows on focus
         if self.is_floating(window) {
