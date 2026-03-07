@@ -102,16 +102,7 @@ blur-method = "{}";
 blur-strength = {};
 blur-background = true;
 blur-background-frame = false;
-blur-kern = "3x3box";
-
-blur-background-exclude = [
-    "window_type = 'dock'",
-    "window_type = 'desktop'",
-    "window_type = 'menu'",
-    "window_type = 'dropdown_menu'",
-    "window_type = 'popup_menu'",
-    "_NET_WM_BYPASS_COMPOSITOR = 1"
-];"#,
+blur-kern = "3x3box";"#,
                 blur_method, blur_strength
             )
         } else {
@@ -125,18 +116,7 @@ shadow = true;
 shadow-radius = {};
 shadow-opacity = {:.2};
 shadow-offset-x = {};
-shadow-offset-y = {};
-
-shadow-exclude = [
-    "window_type = 'dock'",
-    "window_type = 'desktop'",
-    "window_type = 'menu'",
-    "window_type = 'dropdown_menu'",
-    "window_type = 'popup_menu'",
-    "window_type = 'tooltip'",
-    "_NET_WM_STATE *= '_NET_WM_STATE_FULLSCREEN'",
-    "_NET_WM_BYPASS_COMPOSITOR = 1"
-];"#,
+shadow-offset-y = {};"#,
                 self.shadow_radius,
                 self.shadow_opacity,
                 self.shadow_offset_x,
@@ -154,13 +134,7 @@ fade-in-step = 0.028;
 fade-out-step = 0.03;
 fade-delta = {};
 
-no-fading-destroyed-argb = true;
-
-fade-exclude = [
-    "window_type = 'menu'",
-    "window_type = 'dropdown_menu'",
-    "window_type = 'popup_menu'"
-];"#,
+no-fading-destroyed-argb = true;"#,
                 self.fade_delta
             )
         } else {
@@ -230,42 +204,105 @@ animations = ({{
             "# No custom shader".to_string()
         };
 
-        // Per-window rules section
-        let rules_section = if !self.picom_rules.is_empty() {
-            let mut rules = String::from("# Per-window Rules\nrules = (\n");
-            for rule in &self.picom_rules {
-                rules.push_str(&format!("    {{\n        match = \"{}\";\n", rule.match_expr));
-                if let Some(cr) = rule.corner_radius {
-                    rules.push_str(&format!("        corner-radius = {};\n", cr));
-                }
-                if let Some(opacity) = rule.opacity {
-                    rules.push_str(&format!("        opacity = {:.2};\n", opacity));
-                }
-                if let Some(shadow) = rule.shadow {
-                    rules.push_str(&format!("        shadow = {};\n", shadow));
-                }
-                if let Some(blur) = rule.blur_background {
-                    rules.push_str(&format!("        blur-background = {};\n", blur));
-                }
-                if let Some(ref shader) = rule.shader {
-                    let expanded = if shader.starts_with("~/") {
-                        if let Some(home) = dirs::home_dir() {
-                            home.join(&shader[2..]).to_string_lossy().to_string()
-                        } else {
-                            shader.clone()
-                        }
+        // Unified rules section (picom v13 format)
+        // Replaces deprecated: shadow-exclude, fade-exclude, blur-background-exclude,
+        // rounded-corners-exclude, and wintypes blocks
+        let mut rules = String::from("# Rules (picom v13 format)\nrules = (\n");
+
+        // Built-in window type rules
+        rules.push_str(r#"    {
+        match = "window_type = 'dock'";
+        shadow = false;
+        corner-radius = 0;
+        blur-background = false;
+        clip-shadow-above = true;
+    },
+    {
+        match = "window_type = 'desktop'";
+        shadow = false;
+        corner-radius = 0;
+        blur-background = false;
+    },
+    {
+        match = "window_type = 'tooltip'";
+        shadow = false;
+        corner-radius = 0;
+        blur-background = false;
+        fade = true;
+        opacity = 0.95;
+        focus = true;
+    },
+    {
+        match = "window_type = 'menu'";
+        shadow = false;
+        corner-radius = 0;
+        blur-background = false;
+        fade = false;
+    },
+    {
+        match = "window_type = 'dropdown_menu'";
+        shadow = false;
+        corner-radius = 0;
+        blur-background = false;
+        fade = false;
+        opacity = 0.95;
+    },
+    {
+        match = "window_type = 'popup_menu'";
+        shadow = false;
+        corner-radius = 0;
+        blur-background = false;
+        fade = false;
+        opacity = 0.95;
+    },
+    {
+        match = "window_type = 'dnd'";
+        shadow = false;
+    },
+    {
+        match = "_NET_WM_STATE *= '_NET_WM_STATE_FULLSCREEN'";
+        corner-radius = 0;
+        shadow = false;
+    },
+    {
+        match = "_NET_WM_BYPASS_COMPOSITOR = 1";
+        shadow = false;
+        blur-background = false;
+    },
+"#);
+
+        // User custom picom rules
+        for rule in &self.picom_rules {
+            rules.push_str(&format!("    {{\n        match = \"{}\";\n", rule.match_expr));
+            if let Some(cr) = rule.corner_radius {
+                rules.push_str(&format!("        corner-radius = {};\n", cr));
+            }
+            if let Some(opacity) = rule.opacity {
+                rules.push_str(&format!("        opacity = {:.2};\n", opacity));
+            }
+            if let Some(shadow) = rule.shadow {
+                rules.push_str(&format!("        shadow = {};\n", shadow));
+            }
+            if let Some(blur) = rule.blur_background {
+                rules.push_str(&format!("        blur-background = {};\n", blur));
+            }
+            if let Some(ref shader) = rule.shader {
+                let expanded = if shader.starts_with("~/") {
+                    if let Some(home) = dirs::home_dir() {
+                        home.join(&shader[2..]).to_string_lossy().to_string()
                     } else {
                         shader.clone()
-                    };
-                    rules.push_str(&format!("        shader = \"{}\";\n", expanded));
-                }
-                rules.push_str("    },\n");
+                    }
+                } else {
+                    shader.clone()
+                };
+                rules.push_str(&format!("        shader = \"{}\";\n", expanded));
             }
-            rules.push_str(");");
-            rules
-        } else {
-            "# No per-window rules".to_string()
-        };
+            rules.push_str("    },\n");
+        }
+
+        rules.push_str(");");
+        let rules_section = rules;
 
         format!(
             r#"# picom.conf - Auto-generated by gar window manager
@@ -280,16 +317,6 @@ use-ewmh-active-win = true;
 # Rounded Corners
 corner-radius = {};
 
-rounded-corners-exclude = [
-    "window_type = 'dock'",
-    "window_type = 'desktop'",
-    "window_type = 'tooltip'",
-    "window_type = 'menu'",
-    "window_type = 'dropdown_menu'",
-    "window_type = 'popup_menu'",
-    "_NET_WM_STATE *= '_NET_WM_STATE_FULLSCREEN'"
-];
-
 {}
 
 {}
@@ -303,33 +330,6 @@ rounded-corners-exclude = [
 {}
 
 {}
-
-# Window Type Settings
-wintypes:
-{{
-    tooltip = {{
-        fade = true;
-        shadow = false;
-        opacity = 0.95;
-        focus = true;
-        blur-background = false;
-    }};
-    dock = {{
-        shadow = false;
-        clip-shadow-above = true;
-    }};
-    dnd = {{
-        shadow = false;
-    }};
-    popup_menu = {{
-        opacity = 0.95;
-        shadow = false;
-    }};
-    dropdown_menu = {{
-        opacity = 0.95;
-        shadow = false;
-    }};
-}};
 "#,
             self.picom_backend,
             self.corner_radius,
