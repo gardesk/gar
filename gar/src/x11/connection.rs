@@ -245,7 +245,8 @@ impl Connection {
                     | EventMask::SUBSTRUCTURE_NOTIFY
                     | EventMask::STRUCTURE_NOTIFY
                     | EventMask::PROPERTY_CHANGE
-                    | EventMask::ENTER_WINDOW,
+                    | EventMask::ENTER_WINDOW
+                    | EventMask::POINTER_MOTION,
             )
             .background_pixel(self.screen().black_pixel)
             .cursor(self.cursor_normal);
