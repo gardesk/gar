@@ -1696,8 +1696,24 @@ impl WindowManager {
             return Ok(());
         }
 
-        // Only focus windows we manage
+        // For unmanaged windows (root window / empty desktop areas),
+        // check if the pointer crossed to a different monitor and update
+        // focused workspace accordingly so garbar underline tracks correctly.
         if !self.windows.contains_key(&window) {
+            let monitor_idx = self.monitor_idx_at_point(event.root_x, event.root_y);
+            if monitor_idx != self.focused_monitor {
+                let old_workspace_idx = self.focused_workspace;
+                self.focused_monitor = monitor_idx;
+                let workspace_idx = self.monitors[monitor_idx].active_workspace;
+                self.focused_workspace = workspace_idx;
+                self.focused_window = None;
+                self.conn.set_active_window(None)?;
+                self.conn.set_current_desktop(workspace_idx as u32)?;
+                if workspace_idx != old_workspace_idx {
+                    self.broadcast_i3_workspace_event("focus", workspace_idx, Some(old_workspace_idx));
+                }
+                self.conn.flush()?;
+            }
             return Ok(());
         }
 
