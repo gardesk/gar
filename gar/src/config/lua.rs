@@ -812,13 +812,13 @@ impl LuaConfig {
                 rule.opacity = Some(op);
             }
 
-            // Optional: shadow
-            if let Ok(shadow) = table.get::<bool>("shadow") {
+            // Optional: shadow (use Option<bool> so nil doesn't become false)
+            if let Ok(Some(shadow)) = table.get::<Option<bool>>("shadow") {
                 rule.shadow = Some(shadow);
             }
 
-            // Optional: blur_background
-            if let Ok(blur) = table.get::<bool>("blur_background") {
+            // Optional: blur_background (use Option<bool> so nil doesn't become false)
+            if let Ok(Some(blur)) = table.get::<Option<bool>>("blur_background") {
                 rule.blur_background = Some(blur);
             }
 
