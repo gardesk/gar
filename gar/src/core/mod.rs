@@ -832,6 +832,11 @@ impl WindowManager {
         // Update borders for all windows on visible workspaces
         for ws_idx in visible_ws {
             for window in self.workspaces[ws_idx].all_windows() {
+                // Fullscreen windows have no borders
+                if self.windows.get(&window).map(|w| w.fullscreen).unwrap_or(false) {
+                    continue;
+                }
+
                 // Check if window is urgent (and not focused - focused clears urgency)
                 let is_urgent = self.windows.get(&window)
                     .map(|w| w.urgent && Some(window) != focused)
@@ -911,19 +916,42 @@ impl WindowManager {
                     fs_window, screen
                 );
 
-                // Configure fullscreen window to cover entire monitor (no gaps, no borders)
-                self.conn.configure_window(
-                    fs_window,
-                    screen.x,
-                    screen.y,
-                    screen.width,
-                    screen.height,
-                    0, // No border for fullscreen
-                )?;
+                if let Some(frame) = self.frames.frame_for_client(fs_window) {
+                    // Window has a frame — position frame at monitor origin with no border,
+                    // and configure client to fill the entire frame.
+                    let frame_aux = ConfigureWindowAux::new()
+                        .x(screen.x as i32)
+                        .y(screen.y as i32)
+                        .width(screen.width as u32)
+                        .height(screen.height as u32)
+                        .border_width(0);
+                    self.conn.conn.configure_window(frame, &frame_aux)?;
 
-                // Raise fullscreen window above everything
-                let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
-                self.conn.conn.configure_window(fs_window, &aux)?;
+                    let client_aux = ConfigureWindowAux::new()
+                        .x(0)
+                        .y(0)
+                        .width(screen.width as u32)
+                        .height(screen.height as u32)
+                        .border_width(0);
+                    self.conn.conn.configure_window(fs_window, &client_aux)?;
+
+                    // Raise frame above everything
+                    let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+                    self.conn.conn.configure_window(frame, &aux)?;
+                } else {
+                    // No frame — configure client directly
+                    self.conn.configure_window(
+                        fs_window,
+                        screen.x,
+                        screen.y,
+                        screen.width,
+                        screen.height,
+                        0,
+                    )?;
+
+                    let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+                    self.conn.conn.configure_window(fs_window, &aux)?;
+                }
 
                 // Skip normal layout for this workspace - fullscreen window covers everything
                 continue;
