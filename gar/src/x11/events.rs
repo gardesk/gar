@@ -2915,6 +2915,17 @@ impl WindowManager {
                     Err(e) => Response::error(e.to_string()),
                 }
             }
+            "exec" => {
+                if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                    std::process::Command::new("sh")
+                        .args(["-c", cmd])
+                        .spawn()
+                        .ok();
+                    Response::success(None)
+                } else {
+                    Response::error("usage: exec {command: \"...\"}")
+                }
+            }
             "exit" => {
                 self.running = false;
                 Response::success(None)
